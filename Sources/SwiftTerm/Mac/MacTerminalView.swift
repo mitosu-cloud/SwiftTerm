@@ -50,11 +50,24 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             }
         }
         
+        /// Creates a font variant with OpenType features disabled for terminal grid rendering.
+        /// Disables ligatures and contextual alternates that can merge glyphs or alter widths.
+        private static func terminalSafe(_ font: NSFont) -> NSFont {
+            let featureSettings: [[NSFontDescriptor.FeatureKey: Int]] = [
+                [.typeIdentifier: kLigaturesType, .selectorIdentifier: kCommonLigaturesOffSelector],
+                [.typeIdentifier: kContextualAlternatesType, .selectorIdentifier: kContextualAlternatesOffSelector],
+            ]
+            let descriptor = font.fontDescriptor.addingAttributes([
+                .featureSettings: featureSettings
+            ])
+            return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
+        }
+
         public init(font baseFont: NSFont, fontSize: CGFloat? = nil) {
-            self.normal = baseFont
-            self.bold = NSFontManager.shared.convert(baseFont, toHaveTrait: [.boldFontMask])
-            self.italic = NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask])
-            self.boldItalic = NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask, .boldFontMask])
+            self.normal = FontSet.terminalSafe(baseFont)
+            self.bold = FontSet.terminalSafe(NSFontManager.shared.convert(baseFont, toHaveTrait: [.boldFontMask]))
+            self.italic = FontSet.terminalSafe(NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask]))
+            self.boldItalic = FontSet.terminalSafe(NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask, .boldFontMask]))
         }
 
         // Expected by the shared rendering code
@@ -462,8 +475,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     open func linefeed(source: Terminal) {
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
+        // Preserve selection while dragging or when mouse reporting is active
+        // (selection is now shown alongside mouse reporting for visual feedback).
+        if !didSelectionDrag && terminal.mouseMode == .off {
             selection.selectNone()
         }
     }
@@ -1205,13 +1219,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     public override func mouseDown(with event: NSEvent) {
-        if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+        let optionHeld = event.modifierFlags.contains(.option)
+        if allowMouseReporting && terminal.mouseMode.sendButtonPress() && !optionHeld {
             sharedMouseEvent(with: event)
-            return
         }
-        
+
         let hit = calculateMouseHit(with: event).grid
-        
+
         switch event.clickCount {
         case 1:
             if selection.active == true {
@@ -1224,10 +1238,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         case 2:
             let displayBuffer = terminal.displayBuffer
             selection.selectWordOrExpression(at: Position(col: hit.col, row: hit.row), in: displayBuffer)
-            
+
         default:
             // 3 and higher
-            
+
             selection.select(row: hit.row)
         }
         setNeedsDisplay(bounds)
@@ -1251,16 +1265,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 }
             }
         }
-        if allowMouseReporting && terminal.mouseMode.sendButtonRelease() {
+        let optionHeld = event.modifierFlags.contains(.option)
+        if allowMouseReporting && terminal.mouseMode.sendButtonRelease() && !optionHeld {
             sharedMouseEvent(with: event)
-            return
         }
-        
+
         #if DEBUG
         // let hit = calculateMouseHit(with: event)
         //print ("Up at col=\(hit.col) row=\(hit.row) count=\(event.clickCount) selection.active=\(selection.active) didSelectionDrag=\(didSelectionDrag) ")
         #endif
-        
+
         didSelectionDrag = false
     }
     
@@ -1268,19 +1282,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let displayBuffer = terminal.displayBuffer
         let mouseHit = calculateMouseHit(with: event)
         let hit = mouseHit.grid
-        if allowMouseReporting {
+        let optionHeld = event.modifierFlags.contains(.option)
+        if allowMouseReporting && !optionHeld {
             if terminal.mouseMode.sendMotionEvent() {
                 let flags = encodeMouseEvent(with: event)
                 let screenRow = max (0, min (displayBuffer.rows - 1, hit.row - displayBuffer.yDisp))
                 terminal.sendMotion(buttonFlags: flags, x: hit.col, y: screenRow, pixelX: mouseHit.pixels.col, pixelY: mouseHit.pixels.row)
-            
-                return
-            }
-            if terminal.mouseMode != .off {
-                return
             }
         }
-                
+
+        // Always perform visual selection tracking (like WezTerm)
         if selection.active {
             selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
         } else {

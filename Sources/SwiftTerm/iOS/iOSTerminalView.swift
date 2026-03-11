@@ -62,29 +62,41 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             UIFont.monospacedSystemFont (ofSize: 12, weight: .regular)
         }
         
+        /// Creates a font variant with OpenType features disabled for terminal grid rendering.
+        private static func terminalSafe(_ font: UIFont) -> UIFont {
+            let featureSettings: [[UIFontDescriptor.FeatureKey: Int]] = [
+                [.type: kLigaturesType, .selector: kCommonLigaturesOffSelector],
+                [.type: kContextualAlternatesType, .selector: kContextualAlternatesOffSelector],
+            ]
+            let descriptor = font.fontDescriptor.addingAttributes([
+                .featureSettings: featureSettings
+            ])
+            return UIFont(descriptor: descriptor, size: font.pointSize)
+        }
+
         public init(font baseFont: UIFont) {
-            self.normal = baseFont
+            self.normal = FontSet.terminalSafe(baseFont)
             if let boldDescriptor = baseFont.fontDescriptor.withSymbolicTraits ([.traitBold]) {
-                self.bold = UIFont (descriptor: boldDescriptor, size: 0)
+                self.bold = FontSet.terminalSafe(UIFont (descriptor: boldDescriptor, size: 0))
             } else {
-                self.bold = baseFont
+                self.bold = FontSet.terminalSafe(baseFont)
             }
-            
+
             if let italicDescriptor = baseFont.fontDescriptor.withSymbolicTraits ([.traitItalic]) {
-                self.italic = UIFont (descriptor: italicDescriptor, size: 0)
+                self.italic = FontSet.terminalSafe(UIFont (descriptor: italicDescriptor, size: 0))
             } else {
-                self.italic = baseFont
+                self.italic = FontSet.terminalSafe(baseFont)
             }
-            
+
             if let boldItalicDescriptor = baseFont.fontDescriptor.withSymbolicTraits ([.traitItalic, .traitBold]) {
-                self.boldItalic = UIFont (descriptor: boldItalicDescriptor, size: 0)
+                self.boldItalic = FontSet.terminalSafe(UIFont (descriptor: boldItalicDescriptor, size: 0))
             } else {
-                if self.italic != baseFont {
+                if self.italic != FontSet.terminalSafe(baseFont) {
                     self.boldItalic = self.italic
-                } else if self.bold != baseFont {
+                } else if self.bold != FontSet.terminalSafe(baseFont) {
                     self.boldItalic = self.bold
                 } else {
-                    self.boldItalic = baseFont
+                    self.boldItalic = FontSet.terminalSafe(baseFont)
                 }
             }
         }
@@ -600,19 +612,18 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
-            
+
             if terminal.mouseMode.sendButtonRelease() {
                 sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
             }
-            return
-        } else {
-            let hit = calculateTapHit(gesture: gestureRecognizer).grid
-            selection.selectWordOrExpression(at: hit, in: terminal.displayBuffer)
-            selection.selectionMode = .character
-            enableSelectionPanGesture()
-            showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
-            queuePendingDisplay()
         }
+        // Always show word selection (visual feedback alongside mouse reporting)
+        let hit = calculateTapHit(gesture: gestureRecognizer).grid
+        selection.selectWordOrExpression(at: hit, in: terminal.displayBuffer)
+        selection.selectionMode = .character
+        enableSelectionPanGesture()
+        showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
+        queuePendingDisplay()
     }
 
     @objc func tripleTap (_ gestureRecognizer: UITapGestureRecognizer)
@@ -629,14 +640,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             if terminal.mouseMode.sendButtonRelease() {
                 sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
             }
-            return
-        } else {
-            let hit = calculateTapHit(gesture: gestureRecognizer).grid
-            selection.select(row: hit.row)
-            enableSelectionPanGesture()
-            showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
-            queuePendingDisplay()
         }
+        // Always show row selection (visual feedback alongside mouse reporting)
+        let hit = calculateTapHit(gesture: gestureRecognizer).grid
+        selection.select(row: hit.row)
+        enableSelectionPanGesture()
+        showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
+        queuePendingDisplay()
     }
     
     var directionView: UIView?
@@ -722,21 +732,47 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if allowMouseReporting && terminal.mouseMode != .off {
             switch gestureRecognizer.state {
             case .began:
-                // send the initial tap
+                // Forward to application (zellij)
                 if terminal.mouseMode.sendButtonPress() {
                     sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
                 }
-            case .ended, .cancelled:
+                // Also start visual selection tracking
+                let hit = calculateTapHit(gesture: gestureRecognizer).grid
+                selection.setSoftStart(bufferPosition: Position(col: hit.col, row: hit.row))
+                selection.startSelection()
+            case .ended:
                 if terminal.mouseMode.sendButtonRelease() {
                     sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
                 }
+                stopSelectionTimer()
+            case .cancelled:
+                if terminal.mouseMode.sendButtonRelease() {
+                    sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
+                }
+                stopSelectionTimer()
+                selection.active = false
             case .changed:
+                // Forward motion to application (zellij)
                 if terminal.mouseMode.sendButtonTracking() {
                     let hit = calculateTapHit(gesture: gestureRecognizer)
                     if let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) {
                         terminal.sendMotion(buttonFlags: encodeFlags(release: false), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
                     }
                 }
+                // Also extend visual selection
+                let absoluteY = gestureRecognizer.location(in: self).y - contentOffset.y
+                let hit = calculateTapHit(gesture: gestureRecognizer).grid
+                if selection.active {
+                    stopSelectionTimer()
+                    selection.pivotExtend(bufferPosition: hit)
+                    if absoluteY < 0 || absoluteY > bounds.height {
+                        startSelectionTimer {
+                            let newPlace = CGRect(x: 0, y: max(0, self.contentOffset.y + absoluteY), width: self.bounds.width, height: self.bounds.height)
+                            self.scrollRectToVisible(newPlace, animated: true)
+                        }
+                    }
+                }
+                setNeedsDisplay()
             default:
                 break
             }
@@ -1121,8 +1157,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     open func linefeed(source: Terminal) {
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
+        // Preserve selection while dragging or when mouse reporting is active
+        // (selection is now shown alongside mouse reporting for visual feedback).
+        if !selection.active && terminal.mouseMode == .off {
             selection.selectNone()
             disableSelectionPanGesture()
         }
