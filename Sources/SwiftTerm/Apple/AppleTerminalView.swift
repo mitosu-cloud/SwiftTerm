@@ -71,6 +71,7 @@ extension TerminalView {
     func resetFont()
     {
         resetCaches()
+        invalidateCursorCache()
         self.cellDimension = computeFontDimensions ()
         let newCols = Int(frame.width / cellDimension.width)
         let newRows = Int(frame.height / cellDimension.height)
@@ -81,6 +82,7 @@ extension TerminalView {
     func updateCaretView ()
     {
         guard let caretView else { return }
+        invalidateCursorCache()
         caretView.frame.size = CGSize(width: cellDimension.width, height: cellDimension.height)
         caretView.updateCursorStyle()
     }
@@ -253,6 +255,7 @@ extension TerminalView {
     {
         terminal.installPalette(colors: colors)
         self.colors = Array(repeating: nil, count: 256)
+        invalidateCursorCache()
         self.colorsChanged()
     }
     
@@ -1335,20 +1338,36 @@ extension TerminalView {
         }
         setNeedsDisplay(region)
         #else
-        // TODO iOS: need to update the code above, but will do that when I get some real
-        // life data being fed into it.
-        setNeedsDisplay(bounds)
+        let displayBuffer = terminal.displayBuffer
+        let yDisp = displayBuffer.yDisp
+        var region = CGRect(x: 0,
+                            y: CGFloat(yDisp + rowStart) * cellDimension.height,
+                            width: frame.width,
+                            height: CGFloat(rowEnd - rowStart + 1) * cellDimension.height)
+
+        if rowEnd == terminal.rows - 1 {
+            let regionBottom = region.origin.y + region.size.height
+            let visibleBottom = CGFloat(yDisp + terminal.rows) * cellDimension.height
+            if regionBottom < visibleBottom {
+                region.size.height = visibleBottom - region.origin.y
+            }
+        }
+        setNeedsDisplay(region)
         #endif
         
         pendingDisplay = false
         updateDebugDisplay ()
         
-        if (notifyAccessibility) {
-            accessibility.invalidate ()
-            #if os(macOS)
-            NSAccessibility.post (element: self, notification: .valueChanged)
-            NSAccessibility.post (element: self, notification: .selectedTextChanged)
-            #endif
+        if notifyAccessibility && accessibilityNotificationsEnabled {
+            let now = Date()
+            if now.timeIntervalSince(_lastAccessibilityNotification) >= 0.1 {
+                _lastAccessibilityNotification = now
+                accessibility.invalidate ()
+                #if os(macOS)
+                NSAccessibility.post (element: self, notification: .valueChanged)
+                NSAccessibility.post (element: self, notification: .selectedTextChanged)
+                #endif
+            }
         }
     }
     
@@ -1359,7 +1378,7 @@ extension TerminalView {
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
         let buffer = terminal.displayBuffer
         let vy = buffer.yBase + buffer.y
-        
+
         if vy >= buffer.yDisp + buffer.rows {
             caretView.removeFromSuperview()
             return
@@ -1368,16 +1387,38 @@ extension TerminalView {
         } else if terminal.cursorHidden == true && caretView.superview == self {
             caretView.removeFromSuperview()
         }
-        let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
-        #if os(iOS) || os(visionOS)
-        let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
-        let lineOrigin = CGPoint(x: 0, y: offset)
-        #else
-        let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
-        let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
-        #endif
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
-        caretView.setText (ch: buffer.lines [vy][buffer.x])
+
+        let col = buffer.x
+        let ch = buffer.lines [vy][col]
+        let positionChanged = col != _lastCursorCol || vy != _lastCursorRow
+        let charChanged = ch.code != _lastCursorCharCode || ch.attribute != _lastCursorAttribute
+
+        if positionChanged {
+            let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
+            #if os(iOS) || os(visionOS)
+            let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
+            let lineOrigin = CGPoint(x: 0, y: offset)
+            #else
+            let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
+            let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
+            #endif
+            caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(col)), y: lineOrigin.y)
+        }
+
+        if positionChanged || charChanged {
+            caretView.setText (ch: ch)
+            _lastCursorCol = col
+            _lastCursorRow = vy
+            _lastCursorCharCode = ch.code
+            _lastCursorAttribute = ch.attribute
+        }
+    }
+
+    func invalidateCursorCache() {
+        _lastCursorCol = -1
+        _lastCursorRow = -1
+        _lastCursorCharCode = -1
+        _lastCursorAttribute = nil
     }
     
     // Does not use a default argument and merge, because it is called back

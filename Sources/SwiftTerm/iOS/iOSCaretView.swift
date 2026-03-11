@@ -61,19 +61,19 @@ class CaretView: UIView {
     
     func updateAnimation (to: Bool) {
         layer.removeAllAnimations()
-        self.layer.opacity = 1
+        layer.opacity = 1
         if window == nil {
             return
         }
         if to {
-            UIView.animate(withDuration: 0.7, delay: 0, options: [.autoreverse, .repeat, .curveEaseIn], animations: {
-                self.layer.opacity = 0.0
-            }, completion: { [weak self] done in
-                // Attempt again, could be the window transitioning
-                if done {
-                    self?.updateAnimation(to: to)
-                }
-            })
+            let anim = CABasicAnimation(keyPath: #keyPath(CALayer.opacity))
+            anim.duration = 0.7
+            anim.autoreverses = true
+            anim.repeatCount = Float.infinity
+            anim.fromValue = NSNumber(floatLiteral: 1)
+            anim.toValue = NSNumber(floatLiteral: 0)
+            anim.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            layer.add(anim, forKey: #keyPath(CALayer.opacity))
         }
     }
     

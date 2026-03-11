@@ -64,9 +64,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         /// Creates a font variant with OpenType features disabled for terminal grid rendering.
         private static func terminalSafe(_ font: UIFont) -> UIFont {
-            let featureSettings: [[UIFontDescriptor.FeatureKey: Int]] = [
-                [.type: kLigaturesType, .selector: kCommonLigaturesOffSelector],
-                [.type: kContextualAlternatesType, .selector: kContextualAlternatesOffSelector],
+            let featureSettings: [[String: Int]] = [
+                [kCTFontFeatureTypeIdentifierKey as String: kLigaturesType,
+                 kCTFontFeatureSelectorIdentifierKey as String: kCommonLigaturesOffSelector],
+                [kCTFontFeatureTypeIdentifierKey as String: kContextualAlternatesType,
+                 kCTFontFeatureSelectorIdentifierKey as String: kContextualAlternatesOffSelector],
             ]
             let descriptor = font.fontDescriptor.addingAttributes([
                 .featureSettings: featureSettings
@@ -167,6 +169,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     var search: SearchService!
     var debug: UIView?
     var pendingDisplay: Bool = false
+
+    // Cursor cache to avoid redundant setText calls
+    var _lastCursorCol: Int = -1
+    var _lastCursorRow: Int = -1
+    var _lastCursorCharCode: Int32 = -1
+    var _lastCursorAttribute: Attribute? = nil
+
+    /// Controls whether accessibility notifications are posted during display updates.
+    /// Defaults to true. Set to false to disable accessibility notifications entirely.
+    public var accessibilityNotificationsEnabled: Bool = true
+
+    /// Tracks the last time an accessibility notification was posted, used for throttling
+    var _lastAccessibilityNotification: Date = .distantPast
+
     var cellDimension: CellDimension!
     var caretView: CaretView?
     var terminal: Terminal!

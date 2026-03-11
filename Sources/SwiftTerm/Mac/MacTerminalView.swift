@@ -106,7 +106,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var findBarOptions: SearchOptions = SearchOptions()
     var debug: TerminalDebugView?
     var pendingDisplay: Bool = false
-    
+
+    // Cursor cache to avoid redundant setText calls
+    var _lastCursorCol: Int = -1
+    var _lastCursorRow: Int = -1
+    var _lastCursorCharCode: Int32 = -1
+    var _lastCursorAttribute: Attribute? = nil
+
+    /// Controls whether accessibility notifications are posted during display updates.
+    /// Defaults to true. Set to false to disable accessibility notifications entirely.
+    public var accessibilityNotificationsEnabled: Bool = true
+
+    /// Tracks the last time an accessibility notification was posted, used for throttling
+    var _lastAccessibilityNotification: Date = .distantPast
+
     var cellDimension: CellDimension!
     var caretView: CaretView!
     public var terminal: Terminal!
