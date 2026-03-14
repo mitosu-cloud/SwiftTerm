@@ -85,5 +85,12 @@ public protocol TerminalViewDelegate: AnyObject {
      */
     func rangeChanged (source: TerminalView, startY: Int, endY: Int)
 
+    /// Invoked when the terminal switches between normal and alternate screen buffer.
+    /// Full-screen apps (vim, tmux, htop, less) activate the alternate screen buffer.
+    func bufferActivated (source: TerminalView, isAlternate: Bool)
+}
+
+extension TerminalViewDelegate {
+    public func bufferActivated (source: TerminalView, isAlternate: Bool) {}
 }
 #endif

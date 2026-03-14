@@ -1536,10 +1536,10 @@ extension TerminalView {
         userScrolling = true
         let displayBuffer = terminal.displayBuffer
         let oldPosition = displayBuffer.yDisp
-        
+
         let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
-        
+
         if newScrollPosition < 0 {
             newScrollPosition = 0
         }
@@ -1549,6 +1549,12 @@ extension TerminalView {
 
         if newScrollPosition != oldPosition {
             scrollTo(row: newScrollPosition)
+        } else {
+            // Even when the position hasn't changed, the scroller and display
+            // may be stale (e.g. after bulk feeding with a suspended delegate).
+            terminal.refresh(startRow: 0, endRow: terminal.rows)
+            updateDisplay()
+            updateScroller()
         }
         userScrolling = false
     }

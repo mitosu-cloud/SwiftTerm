@@ -1094,6 +1094,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     open func bufferActivated(source: Terminal) {
         updateScroller ()
+        terminalDelegate?.bufferActivated(source: self, isAlternate: terminal.isCurrentBufferAlternate)
     }
     
     open func send(source: Terminal, data: ArraySlice<UInt8>) {
