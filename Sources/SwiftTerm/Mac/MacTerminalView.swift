@@ -1407,6 +1407,30 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if event.deltaY == 0 {
             return
         }
+
+        // When mouse reporting is enabled, send scroll as button 4 (up) / 5 (down)
+        // so TUI apps like zellij, vim, etc. receive wheel events.
+        if allowMouseReporting && terminal.mouseMode.sendButtonPress() {
+            let hit = calculateMouseHit(with: event)
+            let steps = max(1, Int(abs(event.deltaY)))
+            let button = event.deltaY > 0 ? 4 : 5
+            let flags = event.modifierFlags
+            let buttonFlags = terminal.encodeButton(
+                button: button, release: false,
+                shift: flags.contains(.shift),
+                meta: flags.contains(.option),
+                control: flags.contains(.control)
+            )
+            for _ in 0..<steps {
+                terminal.sendEvent(
+                    buttonFlags: buttonFlags,
+                    x: hit.grid.col, y: hit.grid.row,
+                    pixelX: hit.pixels.col, pixelY: hit.pixels.row
+                )
+            }
+            return
+        }
+
         let velocity = calcScrollingVelocity(delta: Int (abs (event.deltaY)))
         if event.deltaY > 0 {
             scrollUp (lines: velocity)
