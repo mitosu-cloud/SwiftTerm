@@ -51,6 +51,31 @@ extension TerminalView {
         return false
     }
 
+    /// Returns all matches for `term` in the terminal buffer, ordered top-to-bottom.
+    /// - Parameters:
+    ///   - term: The search term.
+    ///   - options: Search options (case sensitivity, regex, whole word).
+    ///   - limit: Maximum number of results to return (default 1000).
+    /// - Returns: Array of SearchResult with terminal buffer coordinates.
+    public func findAllResults (_ term: String, options: SearchOptions = SearchOptions(), limit: Int = 1000) -> [SearchResult] {
+        guard let search = search else { return [] }
+        return search.findAll(term: term, options: options, limit: limit)
+    }
+
+    /// Selects the given search result in the terminal, highlighting it and
+    /// optionally scrolling it into view.
+    /// - Parameters:
+    ///   - result: A SearchResult previously returned by `findAllResults`.
+    ///   - scrollToResult: Whether to scroll the result into view.
+    /// - Returns: `true` if the selection was applied.
+    @discardableResult
+    public func selectSearchResult (_ result: SearchResult, scrollToResult: Bool = true) -> Bool {
+        guard let search = search, let selection = selection else { return false }
+        let selRange = search.selectionRange(for: result)
+        search.updateLastSelection(SearchSelection(start: selRange.start, end: selRange.end))
+        return applySearchResult(result, selection: selection, scrollToResult: scrollToResult)
+    }
+
     /// Clears the current search state and selection.
     public func clearSearch () {
         search?.reset()

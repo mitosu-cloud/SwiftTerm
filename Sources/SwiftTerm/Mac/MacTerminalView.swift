@@ -1233,9 +1233,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     public override func mouseDown(with event: NSEvent) {
-        let optionHeld = event.modifierFlags.contains(.option)
-        if allowMouseReporting && terminal.mouseMode.sendButtonPress() && !optionHeld {
+        // Shift or Option bypasses mouse reporting — terminal handles selection
+        let bypassReporting = event.modifierFlags.contains(.option) || event.modifierFlags.contains(.shift)
+        if allowMouseReporting && terminal.mouseMode.sendButtonPress() && !bypassReporting {
             sharedMouseEvent(with: event)
+        }
+
+        // When TUI has mouse and no bypass modifier, let the TUI handle everything
+        let tuiHandlesMouse = terminal.isDisplayBufferAlternate && terminal.mouseMode != .off && !bypassReporting
+        if tuiHandlesMouse {
+            return
         }
 
         let hit = calculateMouseHit(with: event).grid
@@ -1279,8 +1286,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 }
             }
         }
-        let optionHeld = event.modifierFlags.contains(.option)
-        if allowMouseReporting && terminal.mouseMode.sendButtonRelease() && !optionHeld {
+        let bypassReporting = event.modifierFlags.contains(.option) || event.modifierFlags.contains(.shift)
+        if allowMouseReporting && terminal.mouseMode.sendButtonRelease() && !bypassReporting {
             sharedMouseEvent(with: event)
         }
 
@@ -1296,21 +1303,30 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let displayBuffer = terminal.displayBuffer
         let mouseHit = calculateMouseHit(with: event)
         let hit = mouseHit.grid
-        let optionHeld = event.modifierFlags.contains(.option)
-        if allowMouseReporting && !optionHeld {
-            if terminal.mouseMode.sendMotionEvent() {
+        let bypassReporting = event.modifierFlags.contains(.option) || event.modifierFlags.contains(.shift)
+        if allowMouseReporting && !bypassReporting {
+            // sendButtonTracking: true for buttonEventTracking AND anyEvent.
+            // sendMotionEvent: true only for anyEvent.
+            // TUI apps like zellij use buttonEventTracking (mode 1002) and need
+            // drag events to render selection highlighting.
+            if terminal.mouseMode.sendButtonTracking() || terminal.mouseMode.sendMotionEvent() {
                 let flags = encodeMouseEvent(with: event)
                 let screenRow = max (0, min (displayBuffer.rows - 1, hit.row - displayBuffer.yDisp))
                 terminal.sendMotion(buttonFlags: flags, x: hit.col, y: screenRow, pixelX: mouseHit.pixels.col, pixelY: mouseHit.pixels.row)
             }
         }
 
-        // Always perform visual selection tracking (like WezTerm)
-        if selection.active {
-            selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
-        } else {
-            selection.setSoftStart(bufferPosition: Position(col: hit.col, row: hit.row))
-            selection.startSelection()
+        // Selection tracking: skip when TUI app handles mouse (no bypass modifier).
+        // TUI apps render their own selection (e.g. zellij copy mode).
+        // Shift+drag or Option+drag bypasses for terminal-level selection.
+        let tuiHandlesMouse = terminal.isDisplayBufferAlternate && terminal.mouseMode != .off && !bypassReporting
+        if !tuiHandlesMouse {
+            if selection.active {
+                selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
+            } else {
+                selection.setSoftStart(bufferPosition: Position(col: hit.col, row: hit.row))
+                selection.startSelection()
+            }
         }
         didSelectionDrag = true
         autoScrollDelta = 0

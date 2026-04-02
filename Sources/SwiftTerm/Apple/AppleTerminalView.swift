@@ -59,6 +59,30 @@ struct ViewLineInfo {
 extension TerminalView {
     typealias CellDimension = CGSize
     
+    /// Slightly brightens very dark non-zero background colors to improve
+    /// visibility of subtle TUI selection highlights. Pure black (0,0,0)
+    /// is left untouched so the terminal background doesn't change.
+    func boostDarkBackground(_ color: TTColor) -> TTColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        #if canImport(AppKit)
+        let c = color.usingColorSpace(.sRGB) ?? color
+        #else
+        let c = color
+        #endif
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+
+        // Only boost colors that are dark but not pure black
+        let maxChannel = max(r, g, b)
+        if maxChannel > 0 && maxChannel < 0.25 {
+            let boost: CGFloat = 0.06
+            r = min(1.0, r + boost)
+            g = min(1.0, g + boost)
+            b = min(1.0, b + boost)
+            return TTColor.make(red: r, green: g, blue: b, alpha: a)
+        }
+        return color
+    }
+
     func resetCaches ()
     {
         self.attributes = [:]
@@ -396,10 +420,14 @@ extension TerminalView {
         if flags.contains(.dim) {
             fgColor = fgColor.dimmedColor()
         }
+        // Boost very dark non-zero backgrounds slightly to improve visibility
+        // of subtle TUI selection highlights (e.g. zellij's dim gray selection).
+        let bgColor = boostDarkBackground(mapColor(color: bg, isFg: false, isBold: false))
+
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,
             .foregroundColor: fgColor,
-            .backgroundColor: mapColor(color: bg, isFg: false, isBold: false),
+            .backgroundColor: bgColor,
             .ligature: 0,
             .kern: CGFloat(0)
         ]
@@ -652,6 +680,13 @@ extension TerminalView {
     /// Returns the selection range for the specified row, if any.
     func selectedColumnsRange(row: Int, cols: Int) -> Range<Int>? {
         guard let selection = self.selection, selection.active else {
+            return nil
+        }
+
+        // Suppress visual selection when a TUI app has mouse reporting active.
+        // The TUI handles its own selection rendering (e.g. zellij's copy mode).
+        // Terminal-level selection is still available via Shift+drag or Option+drag.
+        if terminal.isDisplayBufferAlternate && terminal.mouseMode != .off {
             return nil
         }
 
