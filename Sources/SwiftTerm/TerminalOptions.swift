@@ -38,6 +38,62 @@ public enum CursorStyle {
     }
 }
 
+/// Identifies a terminal capability that can be selectively disabled via
+/// ``TerminalOptions/disabledCapabilities``.
+///
+/// When a capability is disabled, the corresponding DECSET/DECRST escape sequences
+/// are silently ignored, DECRQM queries report the mode as permanently reset, and
+/// DA responses omit the feature where applicable.
+///
+/// By default all capabilities are enabled.
+public enum TerminalCapability: Hashable, CaseIterable, Sendable {
+    // Cursor & Input
+    /// Application cursor keys (DECCKM, mode 1)
+    case applicationCursorKeys
+    /// Application keypad mode (DECNKM, mode 66)
+    case applicationKeypad
+    /// Cursor blink (ATT610, mode 12)
+    case cursorBlink
+
+    // Screen Layout
+    /// 132-column mode (DECCOLM, mode 3) and the allow-transition flag (mode 40)
+    case columnMode132
+    /// Origin mode (DECOM, mode 6)
+    case originMode
+    /// Wraparound mode (DECAWM, mode 7)
+    case wraparound
+    /// Reverse wraparound (mode 45)
+    case reverseWraparound
+    /// Left/right margin mode (DECLRMM, mode 69)
+    case marginMode
+    /// Smooth scroll (DECSCLM, mode 4)
+    case smoothScroll
+    /// Reverse video (DECSCNM, mode 5)
+    case reverseVideo
+
+    // Alternate Screen
+    /// Alternate screen buffer (modes 47, 1047, 1048, 1049)
+    case alternateScreenBuffer
+
+    // Mouse Tracking
+    /// All mouse tracking modes (modes 9, 1000, 1002, 1003)
+    case mouseTracking
+    /// All mouse protocol encodings (modes 1005, 1006, 1015, 1016)
+    case mouseProtocolExtensions
+
+    // Clipboard & Focus
+    /// Bracketed paste mode (mode 2004)
+    case bracketedPaste
+    /// Focus in/out event reporting (mode 1004)
+    case focusReporting
+    /// Synchronized output (mode 2026)
+    case synchronizedOutput
+
+    // Graphics
+    /// Sixel graphics support (DA attribute 4)
+    case sixelGraphics
+}
+
 /// Configuration options for the terminal at startup, these values are only read at startup
 public struct TerminalOptions {
     /// Desired number of columns at startup (default 80)
@@ -62,7 +118,19 @@ public struct TerminalOptions {
     public var kittyImageCacheLimitBytes: Int
     /// Strategy used to derive the 256-color palette from the base 16 colors.
     public var ansi256PaletteStrategy: Ansi256PaletteStrategy
-    
+    /// Terminal capabilities to disable. When a capability is in this set,
+    /// the corresponding DECSET/DECRST escape sequences are silently ignored,
+    /// DECRQM queries report the mode as permanently reset (value 4), and
+    /// DA responses omit the capability.
+    ///
+    /// Defaults to an empty set (all capabilities enabled).
+    public var disabledCapabilities: Set<TerminalCapability>
+
+    /// Returns true if the given capability is enabled (not in ``disabledCapabilities``).
+    public func isCapabilityEnabled (_ capability: TerminalCapability) -> Bool {
+        !disabledCapabilities.contains(capability)
+    }
+
     /// Default options
     public static let `default` = TerminalOptions.init(cols: 80,
                                                        rows: 25,
@@ -74,10 +142,11 @@ public struct TerminalOptions {
                                                        tabStopWidth: 8,
                                                        enableSixelReported: true,
                                                        kittyImageCacheLimitBytes: 320 * 1024 * 1024,
-                                                       ansi256PaletteStrategy: .base16Lab)
+                                                       ansi256PaletteStrategy: .base16Lab,
+                                                       disabledCapabilities: [])
 
   public init(cols: Int = Self.default.cols, rows: Int = Self.default.rows, convertEol: Bool = Self.default.convertEol, termName: String = Self.default.termName, cursorStyle: CursorStyle = Self.default.cursorStyle, screenReaderMode: Bool = Self.default.screenReaderMode, scrollback: Int = Self.default.scrollback, tabStopWidth: Int = Self.default.tabStopWidth,
-              enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy) {
+              enableSixelReported: Bool = Self.default.enableSixelReported, kittyImageCacheLimitBytes: Int = Self.default.kittyImageCacheLimitBytes, ansi256PaletteStrategy: Ansi256PaletteStrategy = Self.default.ansi256PaletteStrategy, disabledCapabilities: Set<TerminalCapability> = Self.default.disabledCapabilities) {
         self.cols = cols
         self.rows = rows
         self.convertEol = convertEol
@@ -89,5 +158,6 @@ public struct TerminalOptions {
         self.enableSixelReported = enableSixelReported
         self.kittyImageCacheLimitBytes = kittyImageCacheLimitBytes
         self.ansi256PaletteStrategy = ansi256PaletteStrategy
+        self.disabledCapabilities = disabledCapabilities
     }
 }

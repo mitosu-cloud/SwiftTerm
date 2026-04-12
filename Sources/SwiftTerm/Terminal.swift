@@ -3099,6 +3099,10 @@ open class Terminal {
         }
         var res = modeUnknown
         if decMode {
+            if let cap = capabilityForDecMode(mode), !options.isCapabilityEnabled(cap) {
+                sendResponse (cc.CSI, "?\(mode);\(modeAlwaysReset)$y")
+                return
+            }
             switch mode {
             case 1: // DECCKM
                 res = applicationCursor ? modeSet : modeReset
@@ -3848,6 +3852,30 @@ open class Terminal {
         resetMode (pars [0], collect)
     }
 
+    /// Maps a DEC private mode number to its corresponding ``TerminalCapability``,
+    /// or `nil` if the mode is not governed by the capability system.
+    func capabilityForDecMode (_ mode: Int) -> TerminalCapability? {
+        switch mode {
+        case 1:                     return .applicationCursorKeys
+        case 3, 40:                 return .columnMode132
+        case 4:                     return .smoothScroll
+        case 5:                     return .reverseVideo
+        case 6:                     return .originMode
+        case 7:                     return .wraparound
+        case 9, 1000, 1002, 1003:  return .mouseTracking
+        case 12:                    return .cursorBlink
+        case 45:                    return .reverseWraparound
+        case 47, 1047, 1048, 1049: return .alternateScreenBuffer
+        case 66:                    return .applicationKeypad
+        case 69:                    return .marginMode
+        case 1004:                  return .focusReporting
+        case 1005, 1006, 1015, 1016: return .mouseProtocolExtensions
+        case 2004:                  return .bracketedPaste
+        case 2026:                  return .synchronizedOutput
+        default:                    return nil
+        }
+    }
+
     func resetMode (_ par: Int, _ collect: cstring)
     {
         if collect == [] {
@@ -3866,6 +3894,9 @@ open class Terminal {
                 break
             }
         } else if collect == [UInt8 (ascii: "?")] {
+            if let cap = capabilityForDecMode(par), !options.isCapabilityEnabled(cap) {
+                return
+            }
             switch (par) {
             case 1:
                 applicationCursor = false
@@ -4087,6 +4118,9 @@ open class Terminal {
                 break
             }
         } else if collect == [UInt8 (ascii: "?")] {
+            if let cap = capabilityForDecMode(par), !options.isCapabilityEnabled(cap) {
+                return
+            }
             switch par {
             case 1:
                 applicationCursor = true
@@ -4350,22 +4384,33 @@ open class Terminal {
         let name = options.termName
         if collect == [] {
             let termVt525 = 65
-            let sixel = options.enableSixelReported ? ";4" : ""
-            let cols132 = 1
-            let printer = 2
-            let decsera = 6
-            let terminalStateInterrogation = 17
-            let horizontalScrolling = 21
-            let ansiColor = 22
-            let rectangularEditing = 28
-            
+            let sixelEnabled = options.enableSixelReported && options.isCapabilityEnabled(.sixelGraphics)
+            let cols132Enabled = options.isCapabilityEnabled(.columnMode132)
+
+            // Build the list of DA attributes, filtering out disabled capabilities
+            var attrs: [Int] = []
+            if cols132Enabled { attrs.append(1) }    // 132-columns
+            attrs.append(2)                           // Printer
+            if sixelEnabled { attrs.append(4) }       // Sixel graphics
+            attrs.append(6)                           // Selective erase (DECSERA)
+            attrs.append(21)                          // Horizontal scrolling
+            attrs.append(22)                          // ANSI color
+            attrs.append(17)                          // Terminal state interrogation
+            attrs.append(28)                          // Rectangular editing
+
+            let attrString = attrs.map { String($0) }.joined(separator: ";")
+
             // Send Device Attributes (Primary DA).1
             if name.hasPrefix("xterm") {
-                sendResponse (cc.CSI, "?\(termVt525)\(sixel);\(cols132);\(printer);\(decsera);\(horizontalScrolling);\(ansiColor);\(terminalStateInterrogation);\(rectangularEditing)c")
+                sendResponse (cc.CSI, "?\(termVt525);\(attrString)c")
             } else if name.hasPrefix("screen") || name.hasPrefix ("rxvt-unicode") {
-                sendResponse (cc.CSI, "?\(cols132);\(printer)c")
+                if cols132Enabled {
+                    sendResponse (cc.CSI, "?1;2c")
+                } else {
+                    sendResponse (cc.CSI, "?2c")
+                }
             } else if name.hasPrefix ("linux") {
-                sendResponse (cc.CSI, "?\(decsera)c")
+                sendResponse (cc.CSI, "?6c")
             }
         } else if collect.count == 1 && collect [0] == UInt8 (ascii: ">") {
             // xterm and urxvt
