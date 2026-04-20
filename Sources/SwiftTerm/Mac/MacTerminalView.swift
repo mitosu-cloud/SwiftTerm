@@ -1413,7 +1413,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             }
         }
         
-        if terminal.mouseMode.sendMotionEvent() {
+        if allowMouseReporting && terminal.mouseMode.sendMotionEvent() {
             let flags = encodeMouseEvent(with: event, overwriteRelease: true)
             terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: hit.grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }

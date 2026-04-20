@@ -1605,8 +1605,6 @@ open class Terminal {
             if let hlt = hyperLinkTracking {
                 let str = hlt.payload
                 if let urlToken = TinyAtom.lookup (value: str) {
-                    print ("[OSC8] CLOSE: payload=\(str) start=\(hlt.start) cur=(\(buffer.x),\(buffer.y)+\(buffer.yBase))")
-
                     // Between the time the flag was set, and now `y` might have changed negatively,
                     // in that case, we do not flag any sequence as a hyperlink
                     if hlt.start.row <= buffer.y+buffer.yBase {
@@ -1614,7 +1612,6 @@ open class Terminal {
                             let line = buffer.lines [y]
                             let startCol = y == hlt.start.row ? min (hlt.start.col, cols-1) : 0
                             let endCol = y == buffer.y ? min (buffer.x, cols-1) : (marginMode ? buffer.marginRight : cols-1)
-                            print ("[OSC8] marking row \(y) cols \(startCol)...\(endCol)")
                             if endCol > startCol {
                                 for x in startCol...endCol {
                                     var cd = line [x]
@@ -1623,19 +1620,12 @@ open class Terminal {
                                 }
                             }
                         }
-                    } else {
-                        print ("[OSC8] SKIPPED: start.row \(hlt.start.row) > cur \(buffer.y+buffer.yBase)")
                     }
-                } else {
-                    print ("[OSC8] TinyAtom.lookup returned nil for: \(str)")
                 }
-            } else {
-                print ("[OSC8] CLOSE but no hyperLinkTracking")
             }
             hyperLinkTracking = nil
         } else {
             let payload = String (bytes:data, encoding: .ascii) ?? ""
-            print ("[OSC8] OPEN: payload=\(payload) at col=\(buffer.x) row=\(buffer.y+buffer.yBase)")
             hyperLinkTracking = (start: Position(col: buffer.x, row: buffer.y+buffer.yBase), payload: payload)
         }
     }
