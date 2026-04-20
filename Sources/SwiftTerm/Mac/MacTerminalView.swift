@@ -1218,6 +1218,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
     }
     
+    /// Cell-level dedup key for mouse motion reports. Suppresses consecutive
+    /// identical motion events (same cell + same button flags) so that 120 Hz
+    /// trackpad sweeps don't flood the remote PTY.
+    private struct MotionKey: Equatable {
+        let col: Int
+        let row: Int
+        let flags: Int
+    }
+    private var lastMotionReport: MotionKey?
+
     private var autoScrollDelta = 0
     // Callback from when the mouseDown autoscrolling timer goes off
     private func scrollingTimerElapsed (source: Timer)
@@ -1312,7 +1322,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             if terminal.mouseMode.sendButtonTracking() || terminal.mouseMode.sendMotionEvent() {
                 let flags = encodeMouseEvent(with: event)
                 let screenRow = max (0, min (displayBuffer.rows - 1, hit.row - displayBuffer.yDisp))
-                terminal.sendMotion(buttonFlags: flags, x: hit.col, y: screenRow, pixelX: mouseHit.pixels.col, pixelY: mouseHit.pixels.row)
+                let key = MotionKey(col: hit.col, row: screenRow, flags: flags)
+                if lastMotionReport != key {
+                    lastMotionReport = key
+                    terminal.sendMotion(buttonFlags: flags, x: hit.col, y: screenRow, pixelX: mouseHit.pixels.col, pixelY: mouseHit.pixels.row)
+                }
             }
         }
 
@@ -1412,9 +1426,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
                 previewUrl (payload: payload)
             }
         }
-        
+
         if allowMouseReporting && terminal.mouseMode.sendMotionEvent() {
             let flags = encodeMouseEvent(with: event, overwriteRelease: true)
+            // Dedup: trackpads at 120 Hz fire many NSEvents per cell. Forwarding
+            // each one floods the remote with identical motion reports. In
+            // particular, zellij (< termwiz fix for wezterm#7076) mis-parses
+            // partial SGR sequences when stdin arrives as many tiny packets.
+            let key = MotionKey(col: hit.grid.col, row: hit.grid.row, flags: flags)
+            if lastMotionReport == key { return }
+            lastMotionReport = key
             terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: hit.grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
     }
