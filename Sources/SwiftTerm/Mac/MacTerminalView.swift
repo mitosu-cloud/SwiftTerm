@@ -501,6 +501,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// need a way of toggling this behavior.
     public var allowMouseReporting: Bool = true
 
+    /// When `false`, suppresses motion-without-button mouse reports only —
+    /// i.e. the events emitted when `mouseMode == .anyEvent` (DECSET 1003).
+    /// Button clicks, drags (button-held motion), and scroll still work
+    /// normally. Intended for servers whose TUI leaks hover events as
+    /// visible text (e.g. zellij 0.43+ with `advanced_mouse_actions` on).
+    public var allowMouseMotionTracking: Bool = true
+
     /**
      * If set to true, this will call the TerminalViewDelegate's rangeChanged method
      * when there are changes that are being performed on the UI
@@ -1427,7 +1434,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             }
         }
 
-        if allowMouseReporting && terminal.mouseMode.sendMotionEvent() {
+        if allowMouseReporting && allowMouseMotionTracking && terminal.mouseMode.sendMotionEvent() {
             let flags = encodeMouseEvent(with: event, overwriteRelease: true)
             // Dedup: trackpads at 120 Hz fire many NSEvents per cell. Forwarding
             // each one floods the remote with identical motion reports. In
