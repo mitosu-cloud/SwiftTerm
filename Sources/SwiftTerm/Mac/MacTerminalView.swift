@@ -1698,6 +1698,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     public func iTermContent (source: Terminal, content: ArraySlice<UInt8>) {
         terminalDelegate?.iTermContent(source: self, content: content)
     }
+
+    /// Forwards OSC 52 copy-to-clipboard requests from the remote app to
+    /// the TerminalViewDelegate (Mitosu's `SwiftTermView.Coordinator`),
+    /// which writes to NSPasteboard. Without this override, the empty
+    /// default in `TerminalDelegate` silently drops OSC 52 on macOS.
+    /// Matches `iOSTerminalView.clipboardCopy(source:Terminal, ...)`.
+    public func clipboardCopy(source: Terminal, content: Data) {
+        terminalDelegate?.clipboardCopy(source: self, content: content)
+    }
 }
 
 
