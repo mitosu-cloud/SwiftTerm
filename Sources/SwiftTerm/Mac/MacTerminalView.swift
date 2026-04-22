@@ -121,6 +121,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var _lastAccessibilityNotification: Date = .distantPast
 
     var cellDimension: CellDimension!
+
+    /// Public read-only accessor for the current cell dimensions (width,
+    /// height in pixels at the current font). Used by external code
+    /// computing natural grid size — e.g. Mitosu's dimension-lock feature.
+    public var currentCellSize: CGSize {
+        guard let d = cellDimension else { return .zero }
+        return CGSize(width: d.width, height: d.height)
+    }
     var caretView: CaretView!
     public var terminal: Terminal!
     private var progressBarView: TerminalProgressBarView?
