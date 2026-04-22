@@ -79,9 +79,10 @@ import QuartzCore
 
         // Linear is the correct magnification filter for scaled AA text.
         // `.nearest` looks jaggy on glyphs; we want the compositor's
-        // bilinear filter to smooth upsamples/downsamples.
-        layer.magnificationFilter = .linear
-        layer.minificationFilter = .linear
+        // bilinear filter to smooth upsamples/downsamples on the layer
+        // that is actually being transformed.
+        terminalView.layer.magnificationFilter = .linear
+        terminalView.layer.minificationFilter = .linear
 
         addSubview(terminalView)
     }
