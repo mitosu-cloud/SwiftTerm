@@ -125,11 +125,13 @@ import QuartzCore
                         bounds.height / naturalSize.height)
         currentScale = scale
 
-        // Order matters: reset transform, then set bounds, then center,
-        // then re-apply transform. Setting bounds while a non-identity
+        // Order matters: reset transform, then resize, then center,
+        // then re-apply transform. Setting geometry while a non-identity
         // transform is live can yield unexpected `frame` side-effects.
+        // Resize via `frame.size` so we preserve any existing
+        // `bounds.origin` / scroll position instead of resetting it.
         terminalView.transform = .identity
-        terminalView.bounds = CGRect(origin: .zero, size: naturalSize)
+        terminalView.frame.size = naturalSize
         terminalView.center = CGPoint(x: bounds.midX, y: bounds.midY)
         terminalView.transform = CGAffineTransform(scaleX: scale, y: scale)
     }
