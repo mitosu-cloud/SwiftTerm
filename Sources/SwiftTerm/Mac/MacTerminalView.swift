@@ -173,20 +173,39 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
     
+    /// Optional initial native background color, applied during setup before
+    /// the first paint. Lets callers avoid the default-then-override race
+    /// where the layer briefly shows `Color.defaultBackground` before being
+    /// reassigned to the desired color.
+    var initialBackgroundColor: NSColor?
+    /// Optional initial native foreground color, see `initialBackgroundColor`.
+    var initialForegroundColor: NSColor?
+
     public init(frame: CGRect, font: NSFont?) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
 
         super.init (frame: frame)
         setup()
     }
-    
+
+    /// Init that accepts initial native background/foreground colors so the
+    /// terminal is painted in the caller's theme color from the first frame
+    /// (no flash through `Color.defaultBackground`).
+    public init(frame: CGRect, font: NSFont?, backgroundColor: NSColor?, foregroundColor: NSColor?) {
+        self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.initialBackgroundColor = backgroundColor
+        self.initialForegroundColor = foregroundColor
+        super.init (frame: frame)
+        setup()
+    }
+
     public override init (frame: CGRect)
     {
         self.fontSet = FontSet (font: FontSet.defaultFont)
         super.init (frame: frame)
         setup()
     }
-    
+
     public required init? (coder: NSCoder)
     {
         self.fontSet = FontSet (font: FontSet.defaultFont)

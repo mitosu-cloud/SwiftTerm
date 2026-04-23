@@ -266,19 +266,38 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         selectNone ()
     }
     
+    /// Optional initial native background color, applied during setup before
+    /// the first paint. Lets callers avoid the default-then-override race
+    /// where the layer briefly shows `Color.defaultBackground` before being
+    /// reassigned to the desired color.
+    var initialBackgroundColor: UIColor?
+    /// Optional initial native foreground color, see `initialBackgroundColor`.
+    var initialForegroundColor: UIColor?
+
     public init(frame: CGRect, font: UIFont?) {
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
         super.init (frame: frame)
         setup()
     }
-    
+
+    /// Init that accepts initial native background/foreground colors so the
+    /// terminal is painted in the caller's theme color from the first frame
+    /// (no flash through `Color.defaultBackground`).
+    public init(frame: CGRect, font: UIFont?, backgroundColor: UIColor?, foregroundColor: UIColor?) {
+        self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
+        self.initialBackgroundColor = backgroundColor
+        self.initialForegroundColor = foregroundColor
+        super.init (frame: frame)
+        setup()
+    }
+
     public override init (frame: CGRect)
     {
         self.fontSet = FontSet (font: FontSet.defaultFont)
         super.init (frame: frame)
         setup()
     }
-    
+
     public required init? (coder: NSCoder)
     {
         self.fontSet = FontSet (font: FontSet.defaultFont)
@@ -1005,7 +1024,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     {
         setupOptions(width: bounds.width, height: bounds.height)
         layer.backgroundColor = nativeBackgroundColor.cgColor
-        nativeBackgroundColor = UIColor.clear
+        // Historically iOS reset nativeBackgroundColor to clear after stamping
+        // the layer, presumably so the parent UIView shows through. When the
+        // caller has supplied an initial background color, preserve it so
+        // later reads (wrapper paint, theme reapply, etc.) get the intended
+        // value rather than clear.
+        if initialBackgroundColor == nil {
+            nativeBackgroundColor = UIColor.clear
+        }
     }
     
     var _nativeFg, _nativeBg: TTColor!

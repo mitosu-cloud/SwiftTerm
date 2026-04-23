@@ -126,14 +126,30 @@ extension TerminalView {
         let terminalOptions = TerminalOptions(cols: Int(width / cellDimension.width),
                                               rows: Int(height / cellDimension.height))
         
-        if terminal == nil {
+        let firstSetup = (terminal == nil)
+        if firstSetup {
             terminal = Terminal(delegate: self, options: terminalOptions)
         } else {
             terminal.options = terminalOptions
             terminal.setup(isReset: false)
         }
-        terminal.backgroundColor = Color.defaultBackground
-        terminal.foregroundColor = Color.defaultForeground
+        // On first setup, honor caller-supplied initial colors so the terminal
+        // is painted with the desired background/foreground from the first
+        // frame, avoiding a flash through Color.defaultBackground (pure black)
+        // before the caller's later assignment lands. Re-setup paths (terminal
+        // already existed) leave colors untouched — they're already correct.
+        if firstSetup {
+            if let bg = initialBackgroundColor {
+                self.nativeBackgroundColor = bg
+            } else {
+                terminal.backgroundColor = Color.defaultBackground
+            }
+            if let fg = initialForegroundColor {
+                self.nativeForegroundColor = fg
+            } else {
+                terminal.foregroundColor = Color.defaultForeground
+            }
+        }
 
         selection = SelectionService(terminal: terminal)
         
