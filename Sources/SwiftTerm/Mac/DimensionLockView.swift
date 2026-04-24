@@ -118,9 +118,20 @@ import QuartzCore
     private func applyUnlockedLayout(bounds: CGRect) {
         currentScale = 1.0
         // Clear any residual sublayer transform from a previous locked state.
-        layer?.sublayerTransform = CATransform3DIdentity
-        // Child fills the wrapper (natural SwiftTerm hosting).
-        terminalView.frame = bounds
+        // Only write when it's actually non-identity — every CALayer assign
+        // forces Core Animation to reconsider the sublayer tree.
+        if let layer, !CATransform3DIsIdentity(layer.sublayerTransform) {
+            layer.sublayerTransform = CATransform3DIdentity
+        }
+        // Child fills the wrapper — but *only* reassign the frame when it
+        // actually changed. Setting NSView.frame unconditionally on every
+        // layout pass triggers SwiftTerm's processSizeChange → Terminal.resize
+        // → Buffer.resize → BufferLine.resize chain, which is O(cols × rows)
+        // per line. That path showed up at ~286 M cycles on trace7 during
+        // idle layout flushes, none of which changed the bounds.
+        if terminalView.frame != bounds {
+            terminalView.frame = bounds
+        }
     }
 
     /// Lock on — child stays at naturalSize centered; wrapper applies a
@@ -158,7 +169,10 @@ import QuartzCore
             x: (bounds.width - naturalSize.width) / 2,
             y: (bounds.height - naturalSize.height) / 2
         )
-        terminalView.frame = CGRect(origin: childOrigin, size: naturalSize)
+        let newChildFrame = CGRect(origin: childOrigin, size: naturalSize)
+        if terminalView.frame != newChildFrame {
+            terminalView.frame = newChildFrame
+        }
 
         // Compound transform: translate to the wrapper's center, scale,
         // translate back. Applied per-sublayer at composite time.
@@ -168,7 +182,9 @@ import QuartzCore
         t = CATransform3DTranslate(t, cx, cy, 0)
         t = CATransform3DScale(t, scale, scale, 1)
         t = CATransform3DTranslate(t, -cx, -cy, 0)
-        layer?.sublayerTransform = t
+        if let layer, !CATransform3DEqualToTransform(layer.sublayerTransform, t) {
+            layer.sublayerTransform = t
+        }
     }
 
     // MARK: - Mouse & hit test forwarding

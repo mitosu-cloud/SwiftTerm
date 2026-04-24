@@ -70,6 +70,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             self.boldItalic = FontSet.terminalSafe(NSFontManager.shared.convert(baseFont, toHaveTrait: [.italicFontMask, .boldFontMask]))
         }
 
+        /// Designated initializer that takes the four pre-built fonts as-is,
+        /// skipping the auto-derived bold/italic conversions and the
+        /// hardcoded `terminalSafe` ligature-disable. Use this when the
+        /// caller has already shaped each variant (cascade list, feature
+        /// settings, weight overrides) — typical for clients that want
+        /// configurable typography (ligature on/off, custom bold weight,
+        /// fallback chain).
+        public init(normal: NSFont, bold: NSFont, italic: NSFont, boldItalic: NSFont) {
+            self.normal = normal
+            self.bold = bold
+            self.italic = italic
+            self.boldItalic = boldItalic
+        }
+
         // Expected by the shared rendering code
         func underlinePosition () -> CGFloat
         {
@@ -171,6 +185,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             resetFont()
             selectNone()
         }
+    }
+
+    /// Replace the four-font set with caller-supplied variants. Use this
+    /// when you want full control over each variant (cascade list,
+    /// feature settings, weight overrides) without going through the
+    /// auto-derive path of `font = ...` (which uses `NSFontManager.convert`
+    /// and the hardcoded ligature-disable in `terminalSafe`).
+    public func setFonts(normal: NSFont, bold: NSFont, italic: NSFont, boldItalic: NSFont) {
+        fontSet = FontSet(normal: normal, bold: bold, italic: italic, boldItalic: boldItalic)
+        resetFont()
+        selectNone()
     }
     
     /// Optional initial native background color, applied during setup before
@@ -485,6 +510,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     open func bufferActivated(source: Terminal) {
         updateScroller ()
+        // Toggling the scroller's hidden state changes `reservedScrollerWidth`
+        // and therefore `getEffectiveWidth(size:)`. Re-derive cols/rows so
+        // the cell grid expands into (or contracts from) the reclaimed
+        // strip on the right edge. processSizeChange's own guard skips
+        // the resize if the cell count didn't actually change.
+        _ = processSizeChange(newSize: bounds.size)
         terminalDelegate?.bufferActivated(source: self, isAlternate: terminal.isCurrentBufferAlternate)
     }
     
@@ -496,17 +527,30 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         NSScroller.scrollerWidth(for: .regular, scrollerStyle: scrollerStyle)
     }
 
+    /// Width currently reserved on the right edge for the scroller. Zero
+    /// when the scroller is hidden (alt-screen mode), so the cell area
+    /// expands to fill the gap.
+    private var reservedScrollerWidth: CGFloat {
+        // `scroller` may be nil during very-early init before `setupScroller`
+        // wires it up; in that path we err on the side of reserving space
+        // (matches old behavior).
+        guard let scroller, !scroller.isHidden else {
+            return scroller == nil ? scrollerWidth : 0
+        }
+        return scrollerWidth
+    }
+
     /**
      * Given the current set of columns and rows returns a frame that would host this control.
      */
     open func getOptimalFrameSize () -> NSRect
     {
-        return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + scrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
+        return NSRect (x: 0, y: 0, width: cellDimension.width * CGFloat(terminal.cols) + reservedScrollerWidth, height: cellDimension.height * CGFloat(terminal.rows))
     }
 
     func getEffectiveWidth (size: CGSize) -> CGFloat
     {
-        return (size.width - scrollerWidth)
+        return (size.width - reservedScrollerWidth)
     }
     
     open func scrolled(source terminal: Terminal, yDisp: Int) {
@@ -547,7 +591,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     func updateScroller () {
-        scroller.isEnabled = canScroll
+        // Hide the scroller entirely when the alt-screen buffer is active
+        // (TUIs like vim/htop/less). The alt buffer has no scrollback —
+        // the scroller would be permanently stuck with no knob, taking up
+        // visual space. `bufferActivated` calls into here on every
+        // alt/normal toggle, so this stays in sync automatically.
+        let inAltScreen = terminal.isCurrentBufferAlternate
+        scroller.isHidden = inAltScreen
+        scroller.isEnabled = !inAltScreen && canScroll
         scroller.doubleValue = scrollPosition
         scroller.knobProportion = scrollThumbsize
     }
