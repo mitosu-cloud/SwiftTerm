@@ -141,6 +141,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      * does not do anything, and selection and panning are still processed.
      */
     public var allowMouseReporting: Bool = true
+    /// When true (the default), very dark non-zero cell backgrounds are
+    /// brightened by 0.06 per channel to improve visibility of subtle TUI
+    /// selection highlights. Set to false to render cells at their exact
+    /// source color.
+    public var boostDarkBackgroundEnabled: Bool = true {
+        didSet { queuePendingDisplay() }
+    }
     
     /**
      * If set, this turns Option-letter keystrokes into an escape + keystroke combination

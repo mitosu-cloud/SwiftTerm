@@ -436,9 +436,14 @@ extension TerminalView {
         if flags.contains(.dim) {
             fgColor = fgColor.dimmedColor()
         }
-        // Boost very dark non-zero backgrounds slightly to improve visibility
-        // of subtle TUI selection highlights (e.g. zellij's dim gray selection).
-        let bgColor = boostDarkBackground(mapColor(color: bg, isFg: false, isBold: false))
+        // Optionally boost very dark non-zero backgrounds slightly to improve
+        // visibility of subtle TUI selection highlights (e.g. zellij's dim
+        // gray selection). When `boostDarkBackgroundEnabled` is false, cells
+        // render at the exact color the terminal/theme specifies — needed
+        // when the terminal bg should visually match a surrounding app
+        // chrome of the same theme color.
+        let mapped = mapColor(color: bg, isFg: false, isBold: false)
+        let bgColor = boostDarkBackgroundEnabled ? boostDarkBackground(mapped) : mapped
 
         var nsattr: [NSAttributedString.Key:Any] = [
             .font: tf,

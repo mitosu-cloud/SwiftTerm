@@ -173,6 +173,15 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// https://gist.github.com/lukaskubanek/9a61ac71dc0db8bb04db2028f2635779
     /// https://developer.apple.com/forums/thread/663256?answerId=646653022#646653022
     public var disableFullRedrawOnAnyChanges = false
+    /// When true (the default), very dark non-zero cell backgrounds are
+    /// brightened by 0.06 per channel to improve visibility of subtle TUI
+    /// selection highlights (e.g. zellij's dim-gray selection strip). Set
+    /// to false to render cells at their exact source color — useful when
+    /// the terminal's background should visually match a surrounding UI of
+    /// the same theme color.
+    public var boostDarkBackgroundEnabled: Bool = true {
+        didSet { queuePendingDisplay() }
+    }
     var fontSet: FontSet
 
     /// The font to use to render the terminal
