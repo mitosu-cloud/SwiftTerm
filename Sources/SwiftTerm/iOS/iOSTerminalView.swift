@@ -214,6 +214,29 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // of attributes for an NSAttributedString
     var attributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
     var urlAttributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
+    /// Per-font cached result of `fontHasFeatureSettings(_:)` — avoids
+    /// `CTFontDescriptorCopyAttributes` per cell. Cleared in `resetCaches`.
+    var _fontFeatureSettingsCache: [ObjectIdentifier: Bool] = [:]
+    /// Per-row cached layout. See MacTerminalView for description.
+    var _rowRenderCache: [Int: RenderCacheEntry] = [:]
+    struct RenderCacheEntry {
+        let lineId: ObjectIdentifier
+        let lineRevision: UInt64
+        let selRange: Range<Int>?
+        let lineInfo: ViewLineInfo
+        let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])]
+        let rowImage: CGImage?
+        let rowImageScale: CGFloat
+    }
+    /// Box-drawing glyph cache. See MacTerminalView for description.
+    var _boxGlyphCache: [BoxGlyphCacheKey: CGImage] = [:]
+    struct BoxGlyphCacheKey: Hashable {
+        let codePoint: UInt32
+        let cellWidthPx: Int
+        let cellHeightPx: Int
+        let baseThicknessPx: Int
+        let colorRgba: UInt32
+    }
 
     // Timer to display the terminal buffer
     var link: CADisplayLink!

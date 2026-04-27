@@ -89,6 +89,9 @@ extension TerminalView {
         self.urlAttributes = [:]
         self.colors = Array(repeating: nil, count: 256)
         self.trueColors = [:]
+        self._fontFeatureSettingsCache = [:]
+        self._rowRenderCache = [:]
+        self._boxGlyphCache = [:]
     }
     
     // This is invoked when the font changes to recompute state
@@ -201,6 +204,41 @@ extension TerminalView {
     }
     
     // Computes the font dimensions once font.normal has been set
+    /// Read a single attribute from a `CTRun` without bridging the whole
+    /// run-attributes CFDictionary into a Swift `[NSAttributedString.Key:
+    /// Any]`. The full bridge calls `_NativeDictionary.init` with a
+    /// closure that bridges every key + value (NSString → String,
+    /// NSColor stays as NSColor, etc.) and accounts for ~430 M cycles
+    /// per render in TUI traces. We only ever read 2-3 known keys per
+    /// run, so direct CFDictionary lookups are dramatically cheaper.
+    @inline(__always)
+    func runAttribute(_ run: CTRun, key: NSAttributedString.Key) -> Any? {
+        let dict = CTRunGetAttributes(run)
+        let cfKey = key.rawValue as CFString
+        let raw = CFDictionaryGetValue(dict, Unmanaged.passUnretained(cfKey).toOpaque())
+        guard let raw else { return nil }
+        return Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue()
+    }
+
+    /// Returns true when the font's descriptor carries its own OpenType
+    /// feature settings (e.g. ligature on/off via
+    /// `kCTFontFeatureSettingsAttribute`). Used by the cell-attribute
+    /// builder to skip the legacy `.ligature: 0` override that would
+    /// otherwise force CoreText to clone the font per cell.
+    ///
+    /// Result cached by font ObjectIdentifier — `fontSet` produces at
+    /// most four distinct fonts (normal/bold/italic/boldItalic), so the
+    /// cache stays tiny. Cleared when the fontSet changes (resetCaches).
+    func fontHasFeatureSettings(_ font: TTFont) -> Bool {
+        let id = ObjectIdentifier(font)
+        if let cached = _fontFeatureSettingsCache[id] { return cached }
+        let key = kCTFontFeatureSettingsAttribute as String
+        let attrs = CTFontDescriptorCopyAttributes(font.fontDescriptor as CTFontDescriptor) as? [String: Any]
+        let has = attrs?[key] != nil
+        _fontFeatureSettingsCache[id] = has
+        return has
+    }
+
     func computeFontDimensions () -> CellDimension
     {
         let lineAscent = CTFontGetAscent (fontSet.normal)
@@ -449,9 +487,22 @@ extension TerminalView {
             .font: tf,
             .foregroundColor: fgColor,
             .backgroundColor: bgColor,
-            .ligature: 0,
             .kern: CGFloat(0)
         ]
+        // Setting `.ligature: 0` here causes CoreText to invoke
+        // `CTFontCreateCopyWithAttributes` per cell to reconcile this
+        // attributed-string-level override with the font's own
+        // `kCTFontFeatureSettingsAttribute`. That copy is ~287 M cycles
+        // per draw pass on a typical full-screen render with our font
+        // configuration, dominating CPU. When the font has feature
+        // settings of its own (which is how SwiftTerm clients should be
+        // configuring ligature behavior now), trust the font and skip
+        // the per-cell override. Fall back to `.ligature: 0` only for
+        // bare fonts without feature configuration so older clients
+        // that depend on this behavior aren't surprised.
+        if !fontHasFeatureSettings(tf) {
+            nsattr[.ligature] = 0
+        }
         if flags.contains (.underline) {
             let underlineColor = attribute.underlineColor.map {
                 mapColor(color: $0, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
@@ -585,6 +636,15 @@ extension TerminalView {
         var lastAttr: Attribute? = nil
         var lastHasUrl = false
         var lastIsSelected = false
+        // One-cell memoization for getAttributes(): TUI/shell output has
+        // long runs of identical (attr, hasUrl) pairs (every char of a
+        // word, every cell of a row of dashes, etc.). Without this cache
+        // each cell hits Dictionary._Variant.lookup → Attribute.hash →
+        // Equatable.== — measured at ~213 M cycles per render in a TUI
+        // profile. The cache short-circuits when nothing has changed.
+        var lastLookupAttr: Attribute? = nil
+        var lastLookupHasUrl = false
+        var lastLookupResult: [NSAttributedString.Key: Any]? = nil
 
         func flushPending() {
             if !pendingText.isEmpty, let attrs = pendingAttrs {
@@ -598,7 +658,19 @@ extension TerminalView {
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
             let hasUrl = ch.hasPayload
-            guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
+
+            let attributes: [NSAttributedString.Key: Any]?
+            if let cached = lastLookupResult,
+               hasUrl == lastLookupHasUrl,
+               lastLookupAttr == attr {
+                attributes = cached
+            } else {
+                attributes = getAttributes(attr, withUrl: hasUrl)
+                lastLookupAttr = attr
+                lastLookupHasUrl = hasUrl
+                lastLookupResult = attributes
+            }
+            guard let attributes else {
                 flushPending()
                 if let finished = builder?.buildIfNeeded() {
                     segments.append(finished)
@@ -915,24 +987,136 @@ extension TerminalView {
         let lineOriginPxX = round(lineOrigin.x * scale)
         let lineOriginPxY = round(lineOrigin.y * scale)
 
+        // Per-call packed-color memo: most box drawings on a single row
+        // share the same fg color (panel borders are uniform), so packSRGB
+        // (which calls CGColorCreateCopyByMatchingToColorSpace — heavy)
+        // would otherwise re-pack the same color per item. Keying on the
+        // ObjectIdentifier of the underlying NSColor handles ~95% of the
+        // calls without needing a stable cross-call cache.
+        var lastColorObj: ObjectIdentifier? = nil
+        var lastColorPacked: UInt32 = 0
+        var lastColorAdjusted: TTColor? = nil
+
         for item in items {
             let cellWidthPx = baseCellWidthPx * item.columnWidth
             let cellWidth = CGFloat(cellWidthPx) / scale
             let cellOrigin = CGPoint(x: (lineOriginPxX + CGFloat(item.column * baseCellWidthPx)) / scale,
                                      y: lineOriginPxY / scale)
-            let baseAlpha = item.foregroundColor.cgColor.alpha
-            let resolvedAlpha = max(0, min(1, baseAlpha))
-            let color = item.foregroundColor.withAlphaComponent(resolvedAlpha)
-            BoxDrawingRenderer.draw(codePoint: item.codePoint,
-                                    in: context,
-                                    cellOrigin: cellOrigin,
-                                    cellSize: CGSize(width: cellWidth, height: cellHeight),
-                                    scale: scale,
-                                    color: color,
-                                    baseThicknessPx: baseThicknessPx)
+            let fg = item.foregroundColor
+            let fgKey = ObjectIdentifier(fg)
+            let colorRgba: UInt32
+            let color: TTColor
+            if let last = lastColorObj, last == fgKey, let cached = lastColorAdjusted {
+                colorRgba = lastColorPacked
+                color = cached
+            } else {
+                let baseAlpha = fg.cgColor.alpha
+                let resolvedAlpha = max(0, min(1, baseAlpha))
+                color = fg.withAlphaComponent(resolvedAlpha)
+                colorRgba = packSRGB(color.cgColor)
+                lastColorObj = fgKey
+                lastColorPacked = colorRgba
+                lastColorAdjusted = color
+            }
+            // Look up (or render-and-cache) the box-drawing glyph. Output
+            // is fully deterministic from these inputs, so caching by
+            // (codePoint, cellWidthPx, cellHeightPx, baseThicknessPx,
+            // packedRGBA) gives a perfect hit rate across paints. Hit
+            // path is one CGContextDrawImage; miss path renders into an
+            // off-screen sRGB bitmap once, stores the CGImage, then blits.
+            let key = BoxGlyphCacheKey(codePoint: item.codePoint,
+                                       cellWidthPx: cellWidthPx,
+                                       cellHeightPx: baseCellHeightPx,
+                                       baseThicknessPx: baseThicknessPx,
+                                       colorRgba: colorRgba)
+            let glyph: CGImage?
+            if let cached = _boxGlyphCache[key] {
+                glyph = cached
+            } else {
+                glyph = renderBoxGlyph(codePoint: item.codePoint,
+                                       cellWidthPx: cellWidthPx,
+                                       cellHeightPx: baseCellHeightPx,
+                                       cellWidthPoints: cellWidth,
+                                       cellHeightPoints: cellHeight,
+                                       baseThicknessPx: baseThicknessPx,
+                                       scale: scale,
+                                       color: color)
+                if let glyph { _boxGlyphCache[key] = glyph }
+            }
+            let dest = CGRect(x: cellOrigin.x, y: cellOrigin.y, width: cellWidth, height: cellHeight)
+            if let glyph {
+                context.draw(glyph, in: dest)
+            } else {
+                // Cache rendering failed (e.g. zero-sized bitmap context) —
+                // fall back to direct draw so the cell still renders.
+                BoxDrawingRenderer.draw(codePoint: item.codePoint,
+                                        in: context,
+                                        cellOrigin: cellOrigin,
+                                        cellSize: CGSize(width: cellWidth, height: cellHeight),
+                                        scale: scale,
+                                        color: color,
+                                        baseThicknessPx: baseThicknessPx)
+            }
         }
 
         context.restoreGState()
+    }
+
+    /// Render one box-drawing glyph into an off-screen `cellWidthPx ×
+    /// cellHeightPx` sRGB bitmap. Used by `drawBoxDrawings`'s glyph cache.
+    private func renderBoxGlyph(codePoint: UInt32,
+                                cellWidthPx: Int,
+                                cellHeightPx: Int,
+                                cellWidthPoints: CGFloat,
+                                cellHeightPoints: CGFloat,
+                                baseThicknessPx: Int,
+                                scale: CGFloat,
+                                color: TTColor) -> CGImage? {
+        guard cellWidthPx > 0, cellHeightPx > 0 else { return nil }
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let bmp = CGContext(data: nil,
+                                  width: cellWidthPx,
+                                  height: cellHeightPx,
+                                  bitsPerComponent: 8,
+                                  bytesPerRow: 0,
+                                  space: cs,
+                                  bitmapInfo: bitmapInfo) else { return nil }
+        bmp.setShouldAntialias(false)
+        bmp.setAllowsAntialiasing(false)
+        // The bitmap has implicit scale 1 (1 unit = 1 device pixel in this
+        // context's coord space). `BoxDrawingCanvas` divides every rect
+        // coordinate by `scale`, so we pass `scale: 1` and feed it pixel-
+        // sized cell dimensions. With those substitutions the renderer
+        // emits fills at pixel-accurate positions inside the bitmap. When
+        // we later `CGContextDrawImage` the bitmap into a higher-DPR
+        // target the dest rect's point size is `cellPx / scale`, so the
+        // bitmap's pixels map 1:1 to device pixels — zero filtering.
+        BoxDrawingRenderer.draw(codePoint: codePoint,
+                                in: bmp,
+                                cellOrigin: .zero,
+                                cellSize: CGSize(width: CGFloat(cellWidthPx), height: CGFloat(cellHeightPx)),
+                                scale: 1,
+                                color: color,
+                                baseThicknessPx: baseThicknessPx)
+        _ = cellWidthPoints  // retained for API symmetry with the on-screen call site
+        _ = cellHeightPoints
+        _ = scale
+        return bmp.makeImage()
+    }
+
+    /// Pack a CGColor into a 32-bit sRGB RGBA value (0xRRGGBBAA) for use
+    /// as a Hashable cache key. Colors that aren't sRGB-convertible
+    /// collapse to 0; cache miss → rendered fresh next time.
+    private func packSRGB(_ cg: CGColor) -> UInt32 {
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let rgb = cg.converted(to: cs, intent: .defaultIntent, options: nil),
+              let comps = rgb.components, comps.count >= 3 else { return 0 }
+        let r = UInt8(clamping: Int(round(comps[0] * 255)))
+        let g = UInt8(clamping: Int(round(comps[1] * 255)))
+        let b = UInt8(clamping: Int(round(comps[2] * 255)))
+        let a = comps.count >= 4 ? UInt8(clamping: Int(round(comps[3] * 255))) : 0xFF
+        return (UInt32(r) << 24) | (UInt32(g) << 16) | (UInt32(b) << 8) | UInt32(a)
     }
 
     
@@ -943,6 +1127,7 @@ extension TerminalView {
         let lineLeading = CTFontGetLeading(fontSet.normal)
         let yOffset = ceil(lineDescent+lineLeading)
         let displayBuffer = terminal.displayBuffer
+        let scale = backingScaleFactor()
 
         func calcLineOffset (forRow: Int) -> CGFloat {
             cellDimension.height * CGFloat (forRow-bufferOffset+1)
@@ -970,7 +1155,15 @@ extension TerminalView {
         }
         var placeholderImageCache: [UInt32: TTImage] = [:]
 
-        for row in firstRow...lastRow {
+        // Plain while loop instead of `for row in firstRow...lastRow` —
+        // the Swift `ClosedRange<Int>` iterator runs through generic
+        // protocol witnesses (`IndexingIterator.next`, `formIndex(after:)`,
+        // `_failEarlyRangeCheck`, generic-metadata machinery) which adds
+        // up to ~240 M cycles in a TUI trace. Direct integer arithmetic
+        // is essentially free.
+        var row = firstRow
+        while row <= lastRow {
+            defer { row += 1 }
             if row < 0 {
                 continue
             }
@@ -1031,7 +1224,43 @@ extension TerminalView {
             } 
             #endif
             let line = displayBuffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+
+            // Per-row layout cache: TUIs (zellij/tmux/vim) re-emit the
+            // exact same cells every animation frame. When the buffer
+            // line's `revision` (bumped on any cell mutation) and the
+            // selection over this row both match the cached values, we
+            // can reuse the previously-built `ViewLineInfo` and the
+            // `CTLine`/`CTRun` arrays without going through
+            // `buildAttributedString` or `CTLineCreateWithAttributedString`
+            // — both of which are dominant hotspots in CPU traces.
+            let lineId = ObjectIdentifier(line)
+            let currentSelRange = selectedColumnsRange(row: row, cols: displayBuffer.cols)
+            let lineInfo: ViewLineInfo
+            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])]
+            if let cached = _rowRenderCache[row],
+               cached.lineId == lineId,
+               cached.lineRevision == line.revision,
+               cached.selRange == currentSelRange {
+                lineInfo = cached.lineInfo
+                preparedSegments = cached.preparedSegments
+            } else {
+                lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+                preparedSegments = lineInfo.segments.compactMap { segment in
+                    guard segment.attributedString.length > 0 else { return nil }
+                    let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
+                    guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
+                    return (segment, ctLine, runs)
+                }
+                _rowRenderCache[row] = RenderCacheEntry(
+                    lineId: lineId,
+                    lineRevision: line.revision,
+                    selRange: currentSelRange,
+                    lineInfo: lineInfo,
+                    preparedSegments: preparedSegments,
+                    rowImage: nil,
+                    rowImageScale: 0
+                )
+            }
             let rowBase = lineOrigin.y + cellDimension.height
             var underTextImages: [AppleImage] = []
             var overTextKittyImages: [AppleImage] = []
@@ -1063,151 +1292,96 @@ extension TerminalView {
                 overTextKittyImages.sort(by: sortKitty)
             }
 
-            // Pre-create CTLines and runs once per row to avoid duplicate creation
-            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])] =
-                lineInfo.segments.compactMap { segment in
-                    guard segment.attributedString.length > 0 else { return nil }
-                    let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
-                    guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
-                    return (segment, ctLine, runs)
+            // Whole-row image cache: when the row's `BufferLine` revision
+            // and selection over the row both match, the previously
+            // captured `CGImage` is identical to what we'd render now.
+            // Blit it instead of re-running bg fills + box drawings +
+            // block elements + glyph rasterization — the dominant cost
+            // of a TUI repaint. Only used for renderMode == .single rows
+            // with no kitty/sixel images (those animate, span rows, or
+            // have z-order semantics not captured in the row image).
+            let isCacheableRow = (renderMode == .single)
+                && (lineInfo.images?.isEmpty ?? true)
+                && lineInfo.kittyPlaceholders.isEmpty
+            if isCacheableRow,
+               let cached = _rowRenderCache[row],
+               let cachedImage = cached.rowImage,
+               cached.rowImageScale == scale,
+               cached.lineId == lineId,
+               cached.lineRevision == line.revision,
+               cached.selRange == currentSelRange {
+                let rowRect = CGRect(x: lineOrigin.x, y: lineOrigin.y,
+                                     width: frame.width, height: cellDimension.height)
+                context.draw(cachedImage, in: rowRect)
+            } else if isCacheableRow {
+                // Cache miss + cacheable: render once into an off-screen
+                // bitmap, blit it on-screen, store the image for the
+                // next paint. Single render path — no double-work — and
+                // subsequent paints land in the fast blit branch above.
+                if let img = renderRowToImage(
+                    preparedSegments: preparedSegments,
+                    lineInfo: lineInfo,
+                    rowDispOffset: row - displayBuffer.yDisp,
+                    rowsTotal: displayBuffer.rows,
+                    yOffset: yOffset,
+                    scale: scale) {
+                    let rowRect = CGRect(x: lineOrigin.x, y: lineOrigin.y,
+                                         width: frame.width, height: cellDimension.height)
+                    context.draw(img, in: rowRect)
+                    _rowRenderCache[row] = RenderCacheEntry(
+                        lineId: lineId,
+                        lineRevision: line.revision,
+                        selRange: currentSelRange,
+                        lineInfo: lineInfo,
+                        preparedSegments: preparedSegments,
+                        rowImage: img,
+                        rowImageScale: scale)
+                } else {
+                    // Bitmap allocation failed — fall back to direct render.
+                    drawRowBackground(
+                        preparedSegments: preparedSegments,
+                        rowDispOffset: row - displayBuffer.yDisp,
+                        rowsTotal: displayBuffer.rows,
+                        lineOrigin: lineOrigin,
+                        into: context)
+                    drawRowText(
+                        preparedSegments: preparedSegments,
+                        lineInfo: lineInfo,
+                        lineOrigin: lineOrigin,
+                        yOffset: yOffset,
+                        into: context)
+                }
+            } else {
+                // Non-cacheable row (renderMode != .single, or has
+                // images / kitty placeholders). Preserve the original
+                // bg → under-text-image → text+box layer ordering.
+                drawRowBackground(
+                    preparedSegments: preparedSegments,
+                    rowDispOffset: row - displayBuffer.yDisp,
+                    rowsTotal: displayBuffer.rows,
+                    lineOrigin: lineOrigin,
+                    into: context)
+
+                if !underTextImages.isEmpty {
+                    let offsetScale = getImageScale()
+                    for image in underTextImages {
+                        let col = image.col
+                        let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
+                        let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
+                        let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
+                                          y: rowBase - CGFloat (image.pixelHeight) + offsetY,
+                                          width: CGFloat (image.pixelWidth),
+                                          height: CGFloat (image.pixelHeight))
+                        image.image.draw (in: rect)
+                    }
                 }
 
-            // Background fill loop — uses cached CTLines
-            context.saveGState()
-            context.setShouldAntialias(false)
-            context.setLineCap(.square)
-            context.setLineWidth(0)
-
-            for prepared in preparedSegments {
-                var processedGlyphs = 0
-                for run in prepared.runs {
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-                    let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    var backgroundColor: TTColor?
-                    if runAttributes.keys.contains(.selectionBackgroundColor) {
-                        backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
-                    } else if runAttributes.keys.contains(.backgroundColor) {
-                        backgroundColor = runAttributes[.backgroundColor] as? TTColor
-                    }
-
-                    if let backgroundColor = backgroundColor {
-                        let columnSpan = max(0, endColumn - startColumn)
-                        if columnSpan > 0 {
-                            context.setFillColor(backgroundColor.cgColor)
-
-                            var rect = CGRect(
-                                x: lineOrigin.x + (CGFloat(startColumn) * cellDimension.width),
-                                y: lineOrigin.y,
-                                width: CGFloat(columnSpan) * cellDimension.width,
-                                height: cellDimension.height)
-
-                            #if (lastLineExtends)
-                            if (row-displayBuffer.yDisp) >= displayBuffer.rows - 1 {
-                                let missing = frame.height - (cellDimension.height + CGFloat(row) + 1)
-                                rect.size.height += missing
-                                rect.origin.y -= missing
-                            }
-                            #endif
-
-                            if endColumn >= terminal.cols {
-                                rect.size.width = frame.width - rect.origin.x
-                            }
-
-                            #if os(macOS)
-                            backgroundColor.setFill()
-                            rect.fill()
-                            #else
-                            context.fill(rect)
-                            #endif
-                        }
-                    }
-                    processedGlyphs += runGlyphsCount
-                }
-            }
-
-            context.restoreGState()
-
-            if !underTextImages.isEmpty {
-                let offsetScale = getImageScale()
-                for image in underTextImages {
-                    let col = image.col
-                    let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
-                    let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
-                    let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
-                                      y: rowBase - CGFloat (image.pixelHeight) + offsetY,
-                                      width: CGFloat (image.pixelWidth),
-                                      height: CGFloat (image.pixelHeight))
-                    image.image.draw (in: rect)
-                }
-            }
-
-            if !lineInfo.boxDrawings.isEmpty {
-                drawBoxDrawings(lineInfo.boxDrawings, lineOrigin: lineOrigin, in: context)
-            }
-
-            if !lineInfo.blockElements.isEmpty {
-                drawBlockElements(lineInfo.blockElements, lineOrigin: lineOrigin, in: context)
-            }
-
-            context.setShouldAntialias(true)
-            context.setAllowsAntialiasing(true)
-            #if os(macOS)
-            context.setShouldSmoothFonts(true)
-            context.setAllowsFontSmoothing(true)
-            #endif
-
-            // Glyph drawing loop — reuses cached CTLines
-            for prepared in preparedSegments {
-                var processedGlyphs = 0
-                for run in prepared.runs {
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let runFont = runAttributes[.font] as! TTFont
-                    let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
-
-                    let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
-                        CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
-                        count = runGlyphsCount
-                    }
-
-                    var coreTextPositions = [CGPoint](repeating: .zero, count: runGlyphsCount)
-                    CTRunGetPositions(run, CFRange(), &coreTextPositions)
-
-                    var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
-                    for i in 0..<runGlyphsCount {
-                        let ctPosition = coreTextPositions[i]
-                        let glyphColumn = startColumn + (i * prepared.segment.columnWidth)
-                        positions[i] = CGPoint(
-                            x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
-                            y: lineOrigin.y + yOffset + ctPosition.y)
-                    }
-
-                    nativeForegroundColor.set()
-
-                    if runAttributes.keys.contains(.foregroundColor) {
-                        let color = runAttributes[.foregroundColor] as! TTColor
-                        let cgColor = color.cgColor
-                        if let colorSpace = cgColor.colorSpace {
-                            context.setFillColorSpace(colorSpace)
-                        }
-                        context.setFillColor(cgColor)
-                    }
-
-                    CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
-
-                    // Draw other attributes
-                    drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
-
-                    processedGlyphs += runGlyphsCount
-                }
+                drawRowText(
+                    preparedSegments: preparedSegments,
+                    lineInfo: lineInfo,
+                    lineOrigin: lineOrigin,
+                    yOffset: yOffset,
+                    into: context)
             }
 
             if !lineInfo.kittyPlaceholders.isEmpty {
@@ -1359,7 +1533,220 @@ extension TerminalView {
         }
 #endif
     }
-    
+
+    /// Draws the per-cell background fills for one row. Split out of the
+    /// main draw loop so the same code paints both the on-screen
+    /// `CGContext` and the off-screen bitmap used for the whole-row
+    /// CGImage cache. Uses `context.setFillColor` + `context.fill`
+    /// uniformly across platforms (the macOS-only `NSColor.setFill` +
+    /// `rect.fill()` path operated on `NSGraphicsContext.current`, which
+    /// breaks for off-screen bitmaps).
+    private func drawRowBackground(
+        preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])],
+        rowDispOffset: Int,
+        rowsTotal: Int,
+        lineOrigin: CGPoint,
+        into context: CGContext
+    ) {
+        context.saveGState()
+        context.setShouldAntialias(false)
+        context.setLineCap(.square)
+        context.setLineWidth(0)
+
+        for prepared in preparedSegments {
+            var processedGlyphs = 0
+            for run in prepared.runs {
+                let runGlyphsCount = CTRunGetGlyphCount(run)
+                if runGlyphsCount == 0 {
+                    continue
+                }
+                let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
+                let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
+                var backgroundColor: TTColor?
+                if let sel = runAttribute(run, key: .selectionBackgroundColor) as? TTColor {
+                    backgroundColor = sel
+                } else if let bg = runAttribute(run, key: .backgroundColor) as? TTColor {
+                    backgroundColor = bg
+                }
+
+                if let backgroundColor = backgroundColor {
+                    let columnSpan = max(0, endColumn - startColumn)
+                    if columnSpan > 0 {
+                        var rect = CGRect(
+                            x: lineOrigin.x + (CGFloat(startColumn) * cellDimension.width),
+                            y: lineOrigin.y,
+                            width: CGFloat(columnSpan) * cellDimension.width,
+                            height: cellDimension.height)
+
+                        #if (lastLineExtends)
+                        if rowDispOffset >= rowsTotal - 1 {
+                            let missing = frame.height - (cellDimension.height + CGFloat(rowDispOffset) + 1)
+                            rect.size.height += missing
+                            rect.origin.y -= missing
+                        }
+                        #endif
+
+                        if endColumn >= terminal.cols {
+                            rect.size.width = max(0, frame.width - rect.origin.x)
+                        }
+
+                        context.setFillColor(backgroundColor.cgColor)
+                        context.fill(rect)
+                    }
+                }
+                processedGlyphs += runGlyphsCount
+            }
+        }
+        _ = rowDispOffset
+        _ = rowsTotal
+
+        context.restoreGState()
+    }
+
+    /// Draws box-drawing glyphs, block elements, and the text glyph
+    /// runs for one row. Companion to `drawRowBackground`. Uses
+    /// `context.setFillColor` for the foreground color fallback (instead
+    /// of `nativeForegroundColor.set()`) so the same code works in both
+    /// on-screen and off-screen contexts.
+    private func drawRowText(
+        preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])],
+        lineInfo: ViewLineInfo,
+        lineOrigin: CGPoint,
+        yOffset: CGFloat,
+        into context: CGContext
+    ) {
+        if !lineInfo.boxDrawings.isEmpty {
+            drawBoxDrawings(lineInfo.boxDrawings, lineOrigin: lineOrigin, in: context)
+        }
+
+        if !lineInfo.blockElements.isEmpty {
+            drawBlockElements(lineInfo.blockElements, lineOrigin: lineOrigin, in: context)
+        }
+
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+        #if os(macOS)
+        context.setShouldSmoothFonts(true)
+        context.setAllowsFontSmoothing(true)
+        #endif
+
+        let nativeFgCG = nativeForegroundColor.cgColor
+
+        for prepared in preparedSegments {
+            var processedGlyphs = 0
+            for run in prepared.runs {
+                let runGlyphsCount = CTRunGetGlyphCount(run)
+                if runGlyphsCount == 0 {
+                    continue
+                }
+                let runFont = (runAttribute(run, key: .font) as? TTFont) ?? fontSet.normal
+                let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
+
+                let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
+                    CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
+                    count = runGlyphsCount
+                }
+
+                var coreTextPositions = [CGPoint](repeating: .zero, count: runGlyphsCount)
+                CTRunGetPositions(run, CFRange(), &coreTextPositions)
+
+                var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
+                for i in 0..<runGlyphsCount {
+                    let ctPosition = coreTextPositions[i]
+                    let glyphColumn = startColumn + (i * prepared.segment.columnWidth)
+                    positions[i] = CGPoint(
+                        x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
+                        y: lineOrigin.y + yOffset + ctPosition.y)
+                }
+
+                if let color = runAttribute(run, key: .foregroundColor) as? TTColor {
+                    let cgColor = color.cgColor
+                    if let colorSpace = cgColor.colorSpace {
+                        context.setFillColorSpace(colorSpace)
+                    }
+                    context.setFillColor(cgColor)
+                } else {
+                    context.setFillColor(nativeFgCG)
+                }
+
+                CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
+
+                let runAttrsRaw = CTRunGetAttributes(run)
+                let underlineKey = NSAttributedString.Key.underlineStyle.rawValue as CFString
+                let strikeKey = NSAttributedString.Key.strikethroughStyle.rawValue as CFString
+                let hasUnderline = CFDictionaryGetValue(runAttrsRaw, Unmanaged.passUnretained(underlineKey).toOpaque()) != nil
+                let hasStrike = CFDictionaryGetValue(runAttrsRaw, Unmanaged.passUnretained(strikeKey).toOpaque()) != nil
+                if hasUnderline || hasStrike {
+                    let runAttributes = (runAttrsRaw as? [NSAttributedString.Key: Any]) ?? [:]
+                    drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
+                }
+
+                processedGlyphs += runGlyphsCount
+            }
+        }
+    }
+
+    /// Renders the cacheable portion of one row (background + text +
+    /// box drawings + block elements) into a fresh CGBitmapContext and
+    /// returns the resulting `CGImage`. Sized at the on-screen device
+    /// pixel scale so the blit on the next paint is 1:1 with no
+    /// resampling. The bitmap starts transparent — bg fills only cover
+    /// the columns that actually have a non-default backgroundColor
+    /// attribute, exactly matching how the on-screen render leaves
+    /// untouched cells (which inherit `nativeBackgroundColor` from
+    /// `setupOptions` clearing the dirty rect before this method runs).
+    private func renderRowToImage(
+        preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])],
+        lineInfo: ViewLineInfo,
+        rowDispOffset: Int,
+        rowsTotal: Int,
+        yOffset: CGFloat,
+        scale: CGFloat
+    ) -> CGImage? {
+        let widthPts = frame.width
+        let heightPts = cellDimension.height
+        let widthPx = max(1, Int(ceil(widthPts * scale)))
+        let heightPx = max(1, Int(ceil(heightPts * scale)))
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let bmp = CGContext(
+            data: nil,
+            width: widthPx,
+            height: heightPx,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: cs,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+        // Match the on-screen scale so 1 unit of user space = 1 point.
+        // The bitmap origin is bottom-left, the same convention as
+        // `drawTerminalContents` operates in (iOS already flips before
+        // calling), so passing lineOrigin = .zero positions the row at
+        // the bottom-left of the bitmap with the row body filling y in
+        // [0, cellDimension.height].
+        bmp.scaleBy(x: scale, y: scale)
+        // Native background fill — so the cached image carries the
+        // terminal's background color in cells without an explicit
+        // attribute, matching the on-screen path where the dirty rect
+        // is cleared with `nativeBackgroundColor` before per-row drawing.
+        bmp.setFillColor(nativeBackgroundColor.cgColor)
+        bmp.fill(CGRect(x: 0, y: 0, width: widthPts, height: heightPts))
+        drawRowBackground(
+            preparedSegments: preparedSegments,
+            rowDispOffset: rowDispOffset,
+            rowsTotal: rowsTotal,
+            lineOrigin: .zero,
+            into: bmp)
+        drawRowText(
+            preparedSegments: preparedSegments,
+            lineInfo: lineInfo,
+            lineOrigin: .zero,
+            yOffset: yOffset,
+            into: bmp)
+        return bmp.makeImage()
+    }
+
     /// Update visible area
     func updateDisplay (notifyAccessibility: Bool)
     {

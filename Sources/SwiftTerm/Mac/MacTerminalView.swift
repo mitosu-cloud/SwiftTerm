@@ -156,6 +156,44 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     // of attributes for an NSAttributedString
     var attributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
     var urlAttributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
+    /// Per-font cached result of `fontHasFeatureSettings(_:)` — avoids
+    /// `CTFontDescriptorCopyAttributes` per cell. Cleared in `resetCaches`.
+    var _fontFeatureSettingsCache: [ObjectIdentifier: Bool] = [:]
+    /// Per-row cached layout. When a row's `BufferLine` hasn't been
+    /// mutated since last paint AND the selection over that row is
+    /// unchanged, `drawTerminalContents` skips `buildAttributedString` +
+    /// `CTLineCreateWithAttributedString` for that row entirely. Hugely
+    /// effective for TUIs (zellij/tmux/vim) that re-emit the same cells
+    /// every animation frame. Cleared in `resetCaches`.
+    var _rowRenderCache: [Int: RenderCacheEntry] = [:]
+    /// Pre-rendered box-drawing glyphs keyed by `(codePoint, cell pixel
+    /// size, thickness, packed sRGB RGBA color)`. Each entry is a small
+    /// `CGImage` rendered once and blitted via `CGContextDrawImage` on
+    /// subsequent paints — orders of magnitude cheaper than repeated
+    /// `CGContextFillRect` calls inside `BoxDrawingRenderer.draw`. Cleared
+    /// in `resetCaches`.
+    var _boxGlyphCache: [BoxGlyphCacheKey: CGImage] = [:]
+    struct BoxGlyphCacheKey: Hashable {
+        let codePoint: UInt32
+        let cellWidthPx: Int
+        let cellHeightPx: Int
+        let baseThicknessPx: Int
+        let colorRgba: UInt32
+    }
+    /// Cache entry for `_rowRenderCache`. `lineId`+`lineRevision` keys
+    /// the BufferLine version; `selRange` invalidates when selection
+    /// over the row changes. `rowImage` is the rendered row blitted on
+    /// subsequent paints — only populated for cacheable rows
+    /// (renderMode == .single, no kitty/sixel images).
+    struct RenderCacheEntry {
+        let lineId: ObjectIdentifier
+        let lineRevision: UInt64
+        let selRange: Range<Int>?
+        let lineInfo: ViewLineInfo
+        let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])]
+        let rowImage: CGImage?
+        let rowImageScale: CGFloat
+    }
     
     
     // Cache for the colors in the 0..255 range

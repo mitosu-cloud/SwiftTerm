@@ -22,13 +22,31 @@ public final class BufferLine: CustomDebugStringConvertible {
         case doubledDown
     }
     var isWrapped: Bool
-    var renderMode: RenderLineMode = .single
+    var renderMode: RenderLineMode = .single {
+        didSet { _bumpRevision() }
+    }
     private var data: UnsafeMutableBufferPointer<CharData>
     private var dataSize: Int
 
     private var fillCharacter: CharData //used to initialise data
 
-    var images: [TerminalImage]?
+    var images: [TerminalImage]? {
+        didSet { _bumpRevision() }
+    }
+
+    /// Monotonically-increasing version number bumped on every mutation
+    /// to the line's content, dimensions, render mode, or images. Renderers
+    /// can use this as a cheap cache key — when `revision` matches the
+    /// previously-rendered value, the line's visual representation is
+    /// guaranteed unchanged and the cached `CTLine`/`ViewLineInfo` can be
+    /// reused without re-running `buildAttributedString` /
+    /// `CTLineCreateWithAttributedString`.
+    public private(set) var revision: UInt64 = 0
+
+    @inline(__always)
+    fileprivate func _bumpRevision() {
+        revision &+= 1
+    }
 
     public init (cols: Int, fillData: CharData? = nil, isWrapped: Bool = false)
     {
@@ -82,14 +100,33 @@ public final class BufferLine: CustomDebugStringConvertible {
             return data [index]
         }
         set(value) {
+            let writeIdx: Int
             if index >= dataSize {
                 // All bugs I was aware of have been handled, but keep this message here to
                 // help future refactorings.
                 print("BufferLine: You passed an index out of range, adjusting to prevent crash, but you should debug")
-                data[dataSize-1] = value
+                writeIdx = dataSize - 1
             } else {
-                data[index] = value
+                writeIdx = index
             }
+            // No-op-write check: TUIs (zellij, tmux, vim) rewrite their
+            // status bars and frames every animation frame with the
+            // *same* characters and attributes. Without this short-circuit
+            // every redundant write bumps `revision`, invalidates the
+            // per-row render cache, and forces SwiftTerm to rebuild the
+            // attributed string + CTLine for that row. Comparing all
+            // visible fields against the existing cell costs ~16 bytes
+            // of struct compare; skipping the rebuild costs orders of
+            // magnitude more.
+            let existing = data[writeIdx]
+            if existing.code == value.code
+                && existing.width == value.width
+                && existing.payload.code == value.payload.code
+                && existing.attribute == value.attribute {
+                return
+            }
+            data[writeIdx] = value
+            _bumpRevision()
         }
     }
 
@@ -102,6 +139,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         let empty = CharData(attribute: attribute)
         data.update(repeating: empty)
         images = nil
+        _bumpRevision()
     }
     /// Test whether contains any chars.
     public func hasContent (index: Int) -> Bool {
@@ -139,6 +177,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data [i] = fillData
             }
         }
+        _bumpRevision()
     }
 
     /// Removes the cells at the specified position, shifting data leftwards
@@ -158,6 +197,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data [i] = fillData
             }
         }
+        _bumpRevision()
     }
 
     /// Replaces the cells in the start to end range with the specified fill data
@@ -165,10 +205,19 @@ public final class BufferLine: CustomDebugStringConvertible {
     {
         let length = dataSize
         var idx = start
+        var changed = false
         while idx < end && idx < length {
-            data [idx] = fillData
+            let existing = data[idx]
+            if existing.code != fillData.code
+                || existing.width != fillData.width
+                || existing.payload.code != fillData.payload.code
+                || existing.attribute != fillData.attribute {
+                data[idx] = fillData
+                changed = true
+            }
             idx += 1
         }
+        if changed { _bumpRevision() }
     }
 
     /// Resizes the buffer line, if the new size is larger, the empty region is filled with
@@ -179,6 +228,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         if len == cols {
             return
         }
+        defer { _bumpRevision() }
 
         if cols > len {
             let newBuf = UnsafeMutableBufferPointer<CharData>.allocate(capacity: cols)
@@ -214,6 +264,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     public func fill (with: CharData)
     {
         data.update(repeating: with)
+        _bumpRevision()
     }
 
     /// Fills the specified region of the bufferline with the specified ``CharData``
@@ -226,6 +277,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         for i in 0..<len {
             data [i+atCol] = with
         }
+        _bumpRevision()
     }
 
     /// Fills the current BufferLine with the contents of another BufferLine.
@@ -245,6 +297,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         }
         dataSize = srcSize
         isWrapped = line.isWrapped
+        _bumpRevision()
     }
 
     /// Returns the trimmed length in terms of cells used from the BufferLine
@@ -282,6 +335,7 @@ public final class BufferLine: CustomDebugStringConvertible {
                 data[dstCol + i] = src.data[srcCol + i]
             }
         }
+        _bumpRevision()
     }
 
     /// Returns the contents of the line as a string in the specified range
