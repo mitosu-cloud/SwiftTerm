@@ -206,9 +206,13 @@ import QuartzCore
         // since we're intercepting, do it explicitly.
         let pointInSelf = self.convert(point, from: superview)
 
-        // When unlocked, defer to default behavior.
+        // When unlocked, hit-test the terminal child directly so AppKit
+        // sends mouse events to it instead of routing them through this
+        // wrapper. Letting the wrapper receive unlocked right-clicks can make
+        // NSView forwarding recursively re-enter this view.
         if !isLocked || currentScale == 1.0 {
-            return super.hitTest(point)
+            let pointInTerminal = terminalView.convert(pointInSelf, from: self)
+            return terminalView.hitTest(pointInTerminal)
         }
 
         // Inverse-transform around the wrapper's center (the anchor the
@@ -277,7 +281,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.mouseDown(with: $1) }
         } else {
-            terminalView.mouseDown(with: event)
+            super.mouseDown(with: event)
         }
     }
 
@@ -285,7 +289,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.mouseUp(with: $1) }
         } else {
-            terminalView.mouseUp(with: event)
+            super.mouseUp(with: event)
         }
     }
 
@@ -293,7 +297,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.mouseDragged(with: $1) }
         } else {
-            terminalView.mouseDragged(with: event)
+            super.mouseDragged(with: event)
         }
     }
 
@@ -301,7 +305,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.mouseMoved(with: $1) }
         } else {
-            terminalView.mouseMoved(with: event)
+            super.mouseMoved(with: event)
         }
     }
 
@@ -309,7 +313,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.rightMouseDown(with: $1) }
         } else {
-            terminalView.rightMouseDown(with: event)
+            super.rightMouseDown(with: event)
         }
     }
 
@@ -317,7 +321,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.rightMouseUp(with: $1) }
         } else {
-            terminalView.rightMouseUp(with: event)
+            super.rightMouseUp(with: event)
         }
     }
 
@@ -325,7 +329,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.otherMouseDown(with: $1) }
         } else {
-            terminalView.otherMouseDown(with: event)
+            super.otherMouseDown(with: event)
         }
     }
 
@@ -333,7 +337,7 @@ import QuartzCore
         if isLocked, currentScale != 1.0 {
             forward(event, to: terminalView) { $0.otherMouseUp(with: $1) }
         } else {
-            terminalView.otherMouseUp(with: event)
+            super.otherMouseUp(with: event)
         }
     }
 
