@@ -1561,14 +1561,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
         if allowMouseReporting && allowMouseMotionTracking && terminal.mouseMode.sendMotionEvent() {
             let flags = encodeMouseEvent(with: event, overwriteRelease: true)
-            // Dedup: trackpads at 120 Hz fire many NSEvents per cell. Forwarding
-            // each one floods the remote with identical motion reports. In
-            // particular, zellij (< termwiz fix for wezterm#7076) mis-parses
-            // partial SGR sequences when stdin arrives as many tiny packets.
-            let key = MotionKey(col: hit.grid.col, row: hit.grid.row, flags: flags)
+            let displayBuffer = terminal.displayBuffer
+            let screenRow = max(0, min(displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
+            // Dedup: trackpads at 120 Hz fire many identical NSEvents per cell.
+            let key = MotionKey(col: hit.grid.col, row: screenRow, flags: flags)
             if lastMotionReport == key { return }
             lastMotionReport = key
-            terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: hit.grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+            terminal.sendMotion(buttonFlags: flags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
     }
     
