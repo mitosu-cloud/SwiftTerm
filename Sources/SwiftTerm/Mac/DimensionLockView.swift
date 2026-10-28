@@ -211,8 +211,8 @@ import QuartzCore
         // wrapper. Letting the wrapper receive unlocked right-clicks can make
         // NSView forwarding recursively re-enter this view.
         if !isLocked || currentScale == 1.0 {
-            let pointInTerminal = terminalView.convert(pointInSelf, from: self)
-            return terminalView.hitTest(pointInTerminal)
+            // The child's hitTest expects a point in its superview's coordinates.
+            return terminalView.hitTest(pointInSelf)
         }
 
         // Inverse-transform around the wrapper's center (the anchor the
@@ -242,6 +242,27 @@ import QuartzCore
         )
     }
 
+    // A child that does not handle an event sends it to its next responder,
+    // which is this wrapper. Do not send that same event back down again.
+    // Keep the original event so ancestors receive visual window coordinates,
+    // and track each event separately to allow independent nested dispatch.
+    private var originalEvents: [ObjectIdentifier: NSEvent] = [:]
+
+    private func shouldForward(_ event: NSEvent) -> Bool {
+        isLocked && currentScale != 1.0 && originalEvents[ObjectIdentifier(event)] == nil
+    }
+
+    private func originalEvent(_ event: NSEvent) -> NSEvent {
+        originalEvents[ObjectIdentifier(event)] ?? event
+    }
+
+    private func deliver(_ event: NSEvent, original: NSEvent, invoke: (NSEvent) -> Void) {
+        let identifier = ObjectIdentifier(event)
+        originalEvents[identifier] = original
+        defer { originalEvents.removeValue(forKey: identifier) }
+        invoke(event)
+    }
+
     /// Synthesize a mouse event whose `locationInWindow` is shifted so
     /// that the child's `convert(locationInWindow, from: nil)` yields the
     /// natural-coord point corresponding to the user's visual click.
@@ -260,7 +281,7 @@ import QuartzCore
         // which is what SwiftTerm's mouse handlers expect as a local
         // natural-coord point inside the child.
         let newLocInWindow = self.convert(natural, to: nil)
-        guard let newEvent = NSEvent.mouseEvent(
+        let newEvent = NSEvent.mouseEvent(
             with: event.type,
             location: newLocInWindow,
             modifierFlags: event.modifierFlags,
@@ -270,74 +291,71 @@ import QuartzCore
             eventNumber: event.eventNumber,
             clickCount: event.clickCount,
             pressure: event.pressure
-        ) else {
-            invoke(child, event)
-            return
-        }
-        invoke(child, newEvent)
+        ) ?? event
+        deliver(newEvent, original: event) { invoke(child, $0) }
     }
 
     open override func mouseDown(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.mouseDown(with: $1) }
         } else {
-            super.mouseDown(with: event)
+            super.mouseDown(with: originalEvent(event))
         }
     }
 
     open override func mouseUp(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.mouseUp(with: $1) }
         } else {
-            super.mouseUp(with: event)
+            super.mouseUp(with: originalEvent(event))
         }
     }
 
     open override func mouseDragged(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.mouseDragged(with: $1) }
         } else {
-            super.mouseDragged(with: event)
+            super.mouseDragged(with: originalEvent(event))
         }
     }
 
     open override func mouseMoved(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.mouseMoved(with: $1) }
         } else {
-            super.mouseMoved(with: event)
+            super.mouseMoved(with: originalEvent(event))
         }
     }
 
     open override func rightMouseDown(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.rightMouseDown(with: $1) }
         } else {
-            super.rightMouseDown(with: event)
+            super.rightMouseDown(with: originalEvent(event))
         }
     }
 
     open override func rightMouseUp(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.rightMouseUp(with: $1) }
         } else {
-            super.rightMouseUp(with: event)
+            super.rightMouseUp(with: originalEvent(event))
         }
     }
 
     open override func otherMouseDown(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.otherMouseDown(with: $1) }
         } else {
-            super.otherMouseDown(with: event)
+            super.otherMouseDown(with: originalEvent(event))
         }
     }
 
     open override func otherMouseUp(with event: NSEvent) {
-        if isLocked, currentScale != 1.0 {
+        if shouldForward(event) {
             forward(event, to: terminalView) { $0.otherMouseUp(with: $1) }
         } else {
-            super.otherMouseUp(with: event)
+            super.otherMouseUp(with: originalEvent(event))
         }
     }
 
@@ -353,7 +371,11 @@ import QuartzCore
         // locked mode may be slightly off-center versus where the user
         // visually aimed. This is a rare edge case and not worth the
         // complexity of coordinate mangling in CGEvent space.
-        terminalView.scrollWheel(with: event)
+        if shouldForward(event) {
+            deliver(event, original: event) { terminalView.scrollWheel(with: $0) }
+        } else {
+            super.scrollWheel(with: originalEvent(event))
+        }
     }
 
     // MARK: - First responder
